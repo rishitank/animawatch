@@ -83,9 +83,7 @@ class OllamaProvider(VisionProvider):
             self.client: Any = ollama.AsyncClient(host=settings.ollama_host)
             self.model = settings.ollama_model
         except ImportError as err:
-            raise ImportError(
-                "Ollama package not installed. Run: pip install ollama"
-            ) from err
+            raise ImportError("Ollama package not installed. Run: pip install ollama") from err
 
     async def analyze_video(self, video_path: Path, prompt: str) -> str:
         """Analyze video by extracting key frames (Ollama doesn't support video directly)."""
@@ -119,4 +117,3 @@ def get_vision_provider() -> VisionProvider:
     if settings.vision_provider == "ollama":
         return OllamaProvider()
     return GeminiProvider()
-

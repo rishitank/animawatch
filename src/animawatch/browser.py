@@ -166,4 +166,3 @@ class BrowserRecorder:
             selector = action.get("selector")
             if selector:
                 await page.hover(selector)
-

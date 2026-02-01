@@ -34,4 +34,3 @@ class TestSettings:
         settings = Settings()
         assert settings.browser_headless is False
         assert settings.max_recording_duration == 60
-
