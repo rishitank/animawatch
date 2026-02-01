@@ -1,24 +1,25 @@
 [project]
-name = "visual-diagnosis-mcp-server"
-version = "0.1.0"
-description = "MCP server for visual animation diagnosis using Playwright and Vision AI"
+name = "animawatch"
+version = "0.2.0"
+description = "MCP server that watches web animations like a human tester - detects jank, stuttering, visual artifacts using AI vision"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [
     { name = "Rishi Tank", email = "3771081+rishitank@users.noreply.github.com" }
 ]
-keywords = ["mcp", "playwright", "vision", "ai", "animation", "testing", "browser"]
+keywords = ["mcp", "animation", "visual-testing", "playwright", "gemini", "ai-vision", "ui-testing", "fastmcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.9.0",
     "playwright>=1.40.0",
     "google-generativeai>=0.8.0",
     "httpx>=0.27.0",
@@ -26,6 +27,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
     "aiofiles>=24.0.0",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -39,14 +41,14 @@ ollama = [
 ]
 
 [project.scripts]
-visual-diagnosis-mcp = "visual_diagnosis_mcp.server:main"
+animawatch = "animawatch.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/visual_diagnosis_mcp"]
+packages = ["src/animawatch"]
 
 [tool.ruff]
 line-length = 100

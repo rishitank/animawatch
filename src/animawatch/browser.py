@@ -1,4 +1,4 @@
-"""Browser automation and video recording using Playwright."""
+"""Browser automation and video recording using Playwright for AnimaWatch."""
 
 import asyncio
 import tempfile
@@ -12,7 +12,7 @@ from .config import settings
 
 
 class BrowserRecorder:
-    """Manages browser automation and video recording."""
+    """Manages browser automation and video recording for AnimaWatch."""
 
     def __init__(self):
         self._playwright = None
@@ -29,8 +29,10 @@ class BrowserRecorder:
         """Stop the browser and cleanup."""
         if self._browser:
             await self._browser.close()
+            self._browser = None
         if self._playwright:
             await self._playwright.stop()
+            self._playwright = None
 
     @asynccontextmanager
     async def recording_context(
@@ -43,7 +45,7 @@ class BrowserRecorder:
 
         # Use temp directory if not specified
         if video_dir is None:
-            video_dir = Path(tempfile.mkdtemp(prefix="visual-diagnosis-"))
+            video_dir = Path(tempfile.mkdtemp(prefix="animawatch-"))
 
         video_dir.mkdir(parents=True, exist_ok=True)
 

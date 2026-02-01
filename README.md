@@ -1,43 +1,69 @@
-# Visual Diagnosis MCP Server
+# 🎬 AnimaWatch
 
-An MCP (Model Context Protocol) server that enables AI assistants to diagnose web animations and UI issues by **watching** them like a human tester would.
+> MCP server that **watches** web animations like a human tester — detects jank, stuttering, visual artifacts using AI vision.
 
-## 🎯 What It Does
+Built with **FastMCP** leveraging the latest MCP spec (2025-11-25) features.
+
+## ✨ What It Does
 
 ```
-YOU: "Diagnose the animation on this modal"
+YOU: "Watch the modal animation on this page"
      ↓
-MCP SERVER:
-  1. Records the browser interaction as video (Playwright)
+ANIMAWATCH:
+  1. Records browser interaction as video (Playwright)
   2. Sends video to Vision AI (Gemini FREE or Ollama local)
-  3. AI watches the recording and identifies issues
+  3. AI watches the recording like a human would
      ↓
 RESULT: "Jank detected at 1.2s - fade-in stutters for 180ms"
 ```
 
-## ✨ Features
+## 🚀 Features
 
-- **🎥 Video Recording**: Records browser interactions using Playwright
-- **👁️ AI Vision Analysis**: Uses Gemini 2.0 Flash (FREE) or Ollama (local) to analyze recordings
-- **🔍 Animation Diagnosis**: Detects jank, stuttering, timing issues, visual artifacts
-- **📸 Screenshot Analysis**: Fast static analysis for non-animated issues
-- **🆓 100% FREE**: Uses Gemini's free tier or runs entirely locally with Ollama
+| Feature | Description |
+|---------|-------------|
+| **🎥 Video Recording** | Records browser interactions using Playwright |
+| **👁️ AI Vision Analysis** | Uses Gemini 2.0 Flash (FREE) or Ollama (local) |
+| **🔍 Animation Diagnosis** | Detects jank, stuttering, timing issues, visual artifacts |
+| **📸 Screenshot Analysis** | Fast static analysis for non-animated issues |
+| **♿ Accessibility Checks** | Visual accessibility analysis (contrast, readability) |
+| **💾 Resources** | Access recordings and analyses via MCP resources |
+| **📝 Prompts** | Pre-defined prompt templates for different analysis types |
+| **🆓 100% FREE** | Uses Gemini's free tier or runs locally with Ollama |
 
-## 🛠️ MCP Tools
+## 🛠️ MCP Capabilities
+
+### Tools
 
 | Tool | Description |
 |------|-------------|
-| `diagnose_animation` | Record and analyze a page for animation issues |
-| `diagnose_page` | Screenshot-based analysis (faster, no video) |
-| `analyze_video` | Analyze an existing video file |
-| `record_interaction` | Just record without analysis |
+| `watch` | 🎬 Record and analyze animations (main tool) |
+| `screenshot` | 📸 Fast static page analysis with image return |
+| `analyze_video` | 🎥 Analyze an existing video file |
+| `record` | ⏺️ Just record without analysis |
+| `check_accessibility` | ♿ Visual accessibility analysis |
+
+### Resources
+
+| URI | Description |
+|-----|-------------|
+| `animawatch://recordings/{id}` | Access stored video recordings |
+| `animawatch://analyses/{id}` | Access stored analysis results |
+| `animawatch://config` | Current server configuration |
+
+### Prompts
+
+| Prompt | Description |
+|--------|-------------|
+| `animation_diagnosis` | Comprehensive animation analysis template |
+| `page_analysis` | Static page visual analysis template |
+| `accessibility_check` | Accessibility-focused analysis template |
 
 ## 🚀 Quick Start
 
 ### 1. Install
 
 ```bash
-cd ~/github/visual-diagnosis-mcp-server
+cd ~/github/animawatch
 uv sync
 uv run playwright install chromium
 ```
@@ -61,9 +87,9 @@ cp .env.example .env
 ```json
 {
   "mcpServers": {
-    "visual-diagnosis": {
+    "animawatch": {
       "command": "uv",
-      "args": ["--directory", "/Users/YOUR_USER/github/visual-diagnosis-mcp-server", "run", "visual-diagnosis-mcp"],
+      "args": ["--directory", "/Users/YOUR_USER/github/animawatch", "run", "animawatch"],
       "env": {
         "GEMINI_API_KEY": "your-api-key-here"
       }
@@ -76,9 +102,9 @@ cp .env.example .env
 ```json
 {
   "mcpServers": {
-    "visual-diagnosis": {
+    "animawatch": {
       "command": "uv",
-      "args": ["--directory", "/Users/YOUR_USER/github/visual-diagnosis-mcp-server", "run", "visual-diagnosis-mcp"],
+      "args": ["--directory", "/Users/YOUR_USER/github/animawatch", "run", "animawatch"],
       "env": {
         "GEMINI_API_KEY": "your-api-key-here"
       }
@@ -89,25 +115,29 @@ cp .env.example .env
 
 ## 📖 Usage Examples
 
-### Diagnose Animation Issues
+### Watch Animation Issues
 ```
-"Use visual-diagnosis to check the modal animation on https://example.com"
-```
-
-The tool will:
-1. Navigate to the URL
-2. Record the page for 3 seconds
-3. Upload video to Gemini
-4. Return detailed analysis with timestamps
-
-### Perform Actions Then Analyze
-```
-"Record clicking the hamburger menu on https://example.com and diagnose the animation"
+"Watch the modal animation on https://example.com for any jank"
 ```
 
-### Custom Analysis Prompt
+### Perform Actions Then Watch
 ```
-"Analyze https://example.com for any loading spinner issues"
+"Click the hamburger menu on https://example.com and watch the slide-in animation"
+```
+
+### Focus on Specific Area
+```
+"Watch https://example.com with focus on scroll behavior"
+```
+
+### Accessibility Check
+```
+"Check accessibility on https://example.com"
+```
+
+### Access Previous Results
+```
+"Show me the analysis from animawatch://analyses/abc123"
 ```
 
 ## 🔧 Configuration
@@ -147,6 +177,29 @@ export OLLAMA_MODEL=qwen2.5-vl:7b
 |----------|------|
 | Gemini (AI Studio) | **FREE** (15 req/min, 1M tokens/day) |
 | Ollama | **FREE** (runs locally) |
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       AnimaWatch                            │
+│                    (FastMCP Server)                         │
+├─────────────────────────────────────────────────────────────┤
+│  Lifespan Context (AppContext)                              │
+│  ├── BrowserRecorder (Playwright)                           │
+│  ├── VisionProvider (Gemini/Ollama)                         │
+│  ├── recordings: dict[id, Path]                             │
+│  └── analyses: dict[id, str]                                │
+├─────────────────────────────────────────────────────────────┤
+│  Tools       │  Resources              │  Prompts           │
+│  ─────────   │  ─────────────────────  │  ──────────────    │
+│  watch       │  animawatch://recordings│  animation_diagnosis│
+│  screenshot  │  animawatch://analyses  │  page_analysis     │
+│  record      │  animawatch://config    │  accessibility_check│
+│  analyze_video│                        │                    │
+│  check_access│                         │                    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## 📄 License
 

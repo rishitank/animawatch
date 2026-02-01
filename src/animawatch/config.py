@@ -1,4 +1,4 @@
-"""Configuration settings for the Visual Diagnosis MCP Server."""
+"""Configuration settings for AnimaWatch MCP Server."""
 
 from pathlib import Path
 from typing import Literal
@@ -54,7 +54,7 @@ class Settings(BaseSettings):
 
     # Server settings
     server_host: str = Field(default="127.0.0.1", description="Server bind address")
-    server_port: int = Field(default=8384, description="Server port")
+    server_port: int = Field(default=8765, description="Server port for HTTP transport")
     recordings_dir: Path | None = Field(
         default=None,
         description="Directory to store recordings (default: temp)",
