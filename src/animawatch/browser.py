@@ -2,11 +2,18 @@
 
 import asyncio
 import tempfile
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any
 
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 from .config import settings
 
@@ -14,18 +21,18 @@ from .config import settings
 class BrowserRecorder:
     """Manages browser automation and video recording for AnimaWatch."""
 
-    def __init__(self):
-        self._playwright = None
+    def __init__(self) -> None:
+        self._playwright: Playwright | None = None
         self._browser: Browser | None = None
 
-    async def start(self):
+    async def start(self) -> None:
         """Start the Playwright browser."""
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
             headless=settings.browser_headless,
         )
 
-    async def stop(self):
+    async def stop(self) -> None:
         """Stop the browser and cleanup."""
         if self._browser:
             await self._browser.close()
@@ -49,10 +56,13 @@ class BrowserRecorder:
 
         video_dir.mkdir(parents=True, exist_ok=True)
 
+        if self._browser is None:
+            raise RuntimeError("Browser not initialized")
+
         context = await self._browser.new_context(
-            viewport=settings.video_size,
+            viewport={"width": settings.video_width, "height": settings.video_height},
             record_video_dir=str(video_dir),
-            record_video_size=settings.video_size,
+            record_video_size={"width": settings.video_width, "height": settings.video_height},
         )
 
         page = await context.new_page()
@@ -60,17 +70,17 @@ class BrowserRecorder:
         try:
             yield context, page, video_dir
         finally:
-            # Get the video path before closing
+            # Ensure video is saved before closing
             video = page.video
             if video:
-                video_path = await video.path()
+                await video.path()  # Wait for video to be saved
 
             await context.close()
 
     async def record_interaction(
         self,
         url: str,
-        actions: list[dict] | None = None,
+        actions: list[dict[str, Any]] | None = None,
         wait_time: float = 3.0,
         video_dir: Path | None = None,
     ) -> Path:
@@ -111,7 +121,12 @@ class BrowserRecorder:
         if not self._browser:
             await self.start()
 
-        context = await self._browser.new_context(viewport=settings.video_size)
+        if self._browser is None:
+            raise RuntimeError("Browser not initialized")
+
+        context = await self._browser.new_context(
+            viewport={"width": settings.video_width, "height": settings.video_height}
+        )
         page = await context.new_page()
 
         try:
@@ -124,7 +139,7 @@ class BrowserRecorder:
         finally:
             await context.close()
 
-    async def _perform_action(self, page: Page, action: dict):
+    async def _perform_action(self, page: Page, action: dict[str, Any]) -> None:
         """Perform a single browser action."""
         action_type = action.get("type", "")
 

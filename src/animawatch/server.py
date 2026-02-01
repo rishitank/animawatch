@@ -8,12 +8,13 @@ Built with FastMCP leveraging the latest MCP spec (2025-11-25):
 - Sampling for server-side LLM requests
 """
 
+import contextlib
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-import uuid
+from typing import Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image
@@ -21,8 +22,7 @@ from mcp.server.session import ServerSession
 
 from .browser import BrowserRecorder
 from .config import settings
-from .vision import VisionProvider, get_vision_provider
-
+from .vision import VisionProvider, get_vision_provider  # noqa: F401
 
 # =============================================================================
 # Application Context (Lifespan Management)
@@ -204,7 +204,7 @@ async def watch(
     wait_time: float = 3.0,
     focus: str = "all",
     save_recording: bool = False,
-    ctx: Context[ServerSession, AppContext] = None,
+    ctx: Context[ServerSession, AppContext] | None = None,
 ) -> str:
     """Watch a web page and analyze animations for issues.
 
@@ -218,6 +218,8 @@ async def watch(
         focus: Focus area for analysis (e.g., "modal animations", "scroll behavior")
         save_recording: Whether to save the recording for later access via resources
     """
+    if ctx is None:
+        raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
     vision = app_ctx.vision
@@ -240,10 +242,8 @@ async def watch(
     if save_recording:
         app_ctx.recordings[result_id] = video_path
     else:
-        try:
+        with contextlib.suppress(Exception):
             video_path.unlink()
-        except Exception:
-            pass
 
     app_ctx.analyses[result_id] = analysis
 
@@ -261,7 +261,7 @@ async def screenshot(
     url: str,
     full_page: bool = True,
     focus: str = "layout, colors, typography, spacing",
-    ctx: Context[ServerSession, AppContext] = None,
+    ctx: Context[ServerSession, AppContext] | None = None,
 ) -> Image:
     """Take a screenshot and return it with analysis.
 
@@ -272,6 +272,8 @@ async def screenshot(
         full_page: Capture full scrollable page or just viewport
         focus: Aspects to focus analysis on
     """
+    if ctx is None:
+        raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
     vision = app_ctx.vision
@@ -290,10 +292,8 @@ async def screenshot(
     with open(screenshot_path, "rb") as f:
         image_data = f.read()
 
-    try:
+    with contextlib.suppress(Exception):
         screenshot_path.unlink()
-    except Exception:
-        pass
 
     return Image(data=image_data, format="png")
 
@@ -302,7 +302,7 @@ async def screenshot(
 async def analyze_video(
     video_path: str,
     focus: str = "all",
-    ctx: Context[ServerSession, AppContext] = None,
+    ctx: Context[ServerSession, AppContext] | None = None,
 ) -> str:
     """Analyze an existing video file for animation issues.
 
@@ -310,6 +310,8 @@ async def analyze_video(
         video_path: Path to the video file
         focus: Focus area for analysis
     """
+    if ctx is None:
+        raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     vision = app_ctx.vision
 
@@ -332,7 +334,7 @@ async def record(
     actions: list[dict[str, Any]] | None = None,
     wait_time: float = 3.0,
     output_dir: str | None = None,
-    ctx: Context[ServerSession, AppContext] = None,
+    ctx: Context[ServerSession, AppContext] | None = None,
 ) -> str:
     """Record a browser interaction without analysis.
 
@@ -344,6 +346,8 @@ async def record(
         wait_time: Seconds to wait after actions
         output_dir: Directory to save video (default: temp directory)
     """
+    if ctx is None:
+        raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
 
@@ -370,7 +374,7 @@ Analyze with: `analyze_video("{video_path}")`"""
 @mcp.tool()
 async def check_accessibility(
     url: str,
-    ctx: Context[ServerSession, AppContext] = None,
+    ctx: Context[ServerSession, AppContext] | None = None,
 ) -> str:
     """Check a page for visual accessibility issues.
 
@@ -379,6 +383,8 @@ async def check_accessibility(
     Args:
         url: URL to check
     """
+    if ctx is None:
+        raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
     vision = app_ctx.vision
@@ -388,10 +394,8 @@ async def check_accessibility(
     prompt = accessibility_check()
     analysis = await vision.analyze_image(screenshot_path, prompt)
 
-    try:
+    with contextlib.suppress(Exception):
         screenshot_path.unlink()
-    except Exception:
-        pass
 
     result_id = str(uuid.uuid4())[:8]
     app_ctx.analyses[result_id] = analysis
@@ -404,12 +408,12 @@ async def check_accessibility(
 # =============================================================================
 
 
-def main():
+def main() -> None:
     """Run the AnimaWatch MCP server."""
     import sys
 
     # Support both stdio (default) and streamable-http transports
-    transport = "stdio"
+    transport: Literal["stdio", "streamable-http"] = "stdio"
     if "--http" in sys.argv:
         transport = "streamable-http"
 

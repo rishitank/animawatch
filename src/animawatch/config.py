@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     )
 
     @property
-    def video_size(self) -> dict:
+    def video_size(self) -> dict[str, int]:
         """Return video size as dict for Playwright."""
         return {"width": self.video_width, "height": self.video_height}
 

@@ -1,8 +1,11 @@
 """Vision AI providers for analyzing videos and screenshots."""
 
 import base64
+import contextlib
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 
 import google.generativeai as genai
 
@@ -26,38 +29,35 @@ class VisionProvider(ABC):
 class GeminiProvider(VisionProvider):
     """Google Gemini vision provider (FREE tier available)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         if not settings.gemini_api_key:
             raise ValueError(
                 "GEMINI_API_KEY not set. Get a free key at https://aistudio.google.com/"
             )
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(settings.vision_model)
+        genai.configure(api_key=settings.gemini_api_key)  # type: ignore[attr-defined]
+        self.model: Any = genai.GenerativeModel(settings.vision_model)  # type: ignore[attr-defined]
 
     async def analyze_video(self, video_path: Path, prompt: str) -> str:
         """Analyze video using Gemini's video understanding."""
         # Upload the video file
-        video_file = genai.upload_file(str(video_path))
+        video_file: Any = genai.upload_file(str(video_path))  # type: ignore[attr-defined]
 
         # Wait for processing
-        import time
         while video_file.state.name == "PROCESSING":
             time.sleep(1)
-            video_file = genai.get_file(video_file.name)
+            video_file = genai.get_file(video_file.name)  # type: ignore[attr-defined]
 
         if video_file.state.name == "FAILED":
             raise RuntimeError(f"Video processing failed: {video_file.state.name}")
 
         # Generate analysis
-        response = self.model.generate_content([video_file, prompt])
+        response: Any = self.model.generate_content([video_file, prompt])
 
         # Clean up uploaded file
-        try:
-            genai.delete_file(video_file.name)
-        except Exception:
-            pass  # Ignore cleanup errors
+        with contextlib.suppress(Exception):
+            genai.delete_file(video_file.name)  # type: ignore[attr-defined]
 
-        return response.text
+        return str(response.text)
 
     async def analyze_image(self, image_path: Path, prompt: str) -> str:
         """Analyze image using Gemini's vision capabilities."""
@@ -69,22 +69,23 @@ class GeminiProvider(VisionProvider):
             "data": base64.b64encode(image_data).decode("utf-8"),
         }
 
-        response = self.model.generate_content([image_part, prompt])
-        return response.text
+        response: Any = self.model.generate_content([image_part, prompt])
+        return str(response.text)
 
 
 class OllamaProvider(VisionProvider):
     """Ollama local vision provider (100% FREE, runs locally)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         try:
             import ollama
-            self.client = ollama.AsyncClient(host=settings.ollama_host)
+
+            self.client: Any = ollama.AsyncClient(host=settings.ollama_host)
             self.model = settings.ollama_model
-        except ImportError:
+        except ImportError as err:
             raise ImportError(
                 "Ollama package not installed. Run: pip install ollama"
-            )
+            ) from err
 
     async def analyze_video(self, video_path: Path, prompt: str) -> str:
         """Analyze video by extracting key frames (Ollama doesn't support video directly)."""
@@ -97,20 +98,20 @@ class OllamaProvider(VisionProvider):
 
     async def analyze_image(self, image_path: Path, prompt: str) -> str:
         """Analyze image using Ollama's vision model."""
-        import ollama
-
         with open(image_path, "rb") as f:
             image_data = base64.b64encode(f.read()).decode("utf-8")
 
-        response = await self.client.chat(
+        response: dict[str, Any] = await self.client.chat(
             model=self.model,
-            messages=[{
-                "role": "user",
-                "content": prompt,
-                "images": [image_data],
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [image_data],
+                }
+            ],
         )
-        return response["message"]["content"]
+        return str(response["message"]["content"])
 
 
 def get_vision_provider() -> VisionProvider:
