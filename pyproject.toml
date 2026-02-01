@@ -1,0 +1,61 @@
+[project]
+name = "visual-diagnosis-mcp-server"
+version = "0.1.0"
+description = "MCP server for visual animation diagnosis using Playwright and Vision AI"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Rishi Tank", email = "3771081+rishitank@users.noreply.github.com" }
+]
+keywords = ["mcp", "playwright", "vision", "ai", "animation", "testing", "browser"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "playwright>=1.40.0",
+    "google-generativeai>=0.8.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "aiofiles>=24.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+]
+ollama = [
+    "ollama>=0.3.0",
+]
+
+[project.scripts]
+visual-diagnosis-mcp = "visual_diagnosis_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/visual_diagnosis_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
