@@ -1,0 +1,26 @@
+name: Auto-Merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Enable Auto-Merge
+    runs-on: ubuntu-latest
+    # Don't run on draft PRs or forked PRs
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Enable auto-merge (squash)
+        # Using PAT instead of GITHUB_TOKEN so that the merge triggers the 'closed' event
+        # for other workflows (GITHUB_TOKEN actions don't trigger subsequent workflows)
+        run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_AUTO_MERGE }}
+

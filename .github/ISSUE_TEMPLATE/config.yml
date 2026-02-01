@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 Documentation
+    url: https://github.com/rishitank/animawatch#readme
+    about: Check the README for usage instructions and examples
+  - name: 💬 Discussions
+    url: https://github.com/rishitank/animawatch/discussions
+    about: Ask questions and discuss ideas
+

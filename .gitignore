@@ -63,5 +63,10 @@ Thumbs.db
 
 # UV
 .uv/
-uv.lock
+
+# mypy
+.mypy_cache/
+
+# Coverage
+coverage.xml
 

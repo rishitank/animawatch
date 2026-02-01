@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Prevent multiple release workflows from running simultaneously
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Auto-merge the Release PR so every merge to main triggers a release
+      - name: Auto-merge Release PR
+        if: steps.release.outputs.pr
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const prNumber = ${{ steps.release.outputs.pr }};
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'squash'
+              });
+              core.info(`✅ Release PR #${prNumber} merged successfully`);
+            } catch (error) {
+              core.warning(`⚠️ Failed to auto-merge Release PR #${prNumber}: ${error.message}`);
+              core.warning('Manual merge may be required if there are conflicts or branch protection rules.');
+            }
+
+  # Build and attach artifacts to the GitHub Release
+  build-release:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+
+      - name: Summary
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## 🎉 Release ${VERSION} Published!"
+            echo ""
+            echo "**Tag:** \`${TAG_NAME}\`"
+            echo ""
+            echo "**Commit:** \`${SHA:0:7}\`"
+            echo ""
+            echo "### Artifacts"
+            echo "- Python wheel and source distribution"
+          } >> "$GITHUB_STEP_SUMMARY"
+

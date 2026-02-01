@@ -34,7 +34,10 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
     "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "pip-audit>=2.7.0",
 ]
 ollama = [
     "ollama>=0.3.0",
@@ -42,6 +45,12 @@ ollama = [
 
 [project.scripts]
 animawatch = "animawatch.server:main"
+
+[project.urls]
+Homepage = "https://github.com/rishitank/animawatch"
+Documentation = "https://github.com/rishitank/animawatch#readme"
+Repository = "https://github.com/rishitank/animawatch"
+Issues = "https://github.com/rishitank/animawatch/issues"
 
 [build-system]
 requires = ["hatchling"]
@@ -55,9 +64,28 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = ["E", "F", "I", "W", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
 

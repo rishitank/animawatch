@@ -1,0 +1,18 @@
+# CODEOWNERS - Automatically request reviews from code owners
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @rishitank
+
+# CI/CD workflows
+.github/ @rishitank
+
+# Core application code
+src/ @rishitank
+
+# Configuration files
+*.json @rishitank
+*.yml @rishitank
+*.yaml @rishitank
+*.toml @rishitank
+

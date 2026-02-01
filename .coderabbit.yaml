@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# CodeRabbit Configuration for AnimaWatch
+# A helpful AI assistant that reviews your code with wit and wisdom
+
+language: "en-GB"
+tone_instructions: "You are Darth Vader. Be commanding and powerful. Call devs 'Apprentice'. Bugs are 'rebel scum'. Good code shows 'the power of the Dark Side'. Example: 'I find your lack of type safety... disturbing.'"
+
+early_access: true
+enable_free_tier: true
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  commit_status: true
+  collapse_walkthrough: false
+  changed_files_summary: true
+  sequence_diagrams: true
+  poem: true
+
+  # Path-specific review instructions
+  path_instructions:
+    - path: "src/**/*.py"
+      instructions: |
+        This is Python code. Enforce:
+        - Type hints everywhere (no `Any` unless justified)
+        - SOLID, KISS, DRY, YAGNI principles
+        - Pydantic for data validation
+        - Proper async/await usage
+        - Use modern Python 3.10+ features
+
+    - path: "tests/**/*.py"
+      instructions: |
+        This is a pytest test file. Verify:
+        - Tests are descriptive and follow AAA pattern (Arrange, Act, Assert)
+        - Mocks are properly typed
+        - Edge cases and error scenarios are covered
+        - No implementation details tested (test behavior, not internals)
+
+    - path: ".github/workflows/*.yml"
+      instructions: |
+        This is a GitHub Actions workflow. Check:
+        - Uses latest action versions
+        - Proper secret handling (no hardcoded values)
+        - Appropriate permissions (principle of least privilege)
+        - Caching configured where beneficial
+
+    - path: "**/*.md"
+      instructions: |
+        This is documentation. Ensure:
+        - Clear and concise language
+        - Code examples are accurate and runnable
+        - Links are valid
+        - Proper markdown formatting
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_usernames: []
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "[skip ci]"
+
+  # Enable relevant linting tools
+  tools:
+    ruff:
+      enabled: true
+    shellcheck:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    actionlint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    hadolint:
+      enabled: true
+    checkov:
+      enabled: true
+    github-checks:
+      enabled: true
+      timeout_ms: 90000
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  learnings:
+    scope: "auto"
+  issues:
+    scope: "auto"
+  pull_requests:
+    scope: "auto"
+
