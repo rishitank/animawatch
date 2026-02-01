@@ -1,41 +1,51 @@
-# Recommended Branch Protection Rules
+# Repository Rulesets
 
-Configure these settings in **Settings → Branches → Add branch protection rule** for the `main` branch.
+This repository uses **Rulesets** (the modern replacement for branch protection rules).
 
-## Branch name pattern
+View and manage rulesets at: **Settings → Rules → Rulesets**
 
-```
-main
-```
+## Main Branch Protection Ruleset
 
-## Protect matching branches
+**Target:** `refs/heads/main`
+**Enforcement:** Active
 
-### ✅ Recommended Settings
+### Rules Applied
 
-| Setting | Value | Description |
-|---------|-------|-------------|
-| **Require a pull request before merging** | ✅ Enabled | All changes must go through PRs |
-| **Require approvals** | 1 | At least one approval required |
-| **Dismiss stale pull request approvals** | ✅ Enabled | New commits invalidate approvals |
-| **Require status checks to pass** | ✅ Enabled | CI must pass before merge |
-| **Require branches to be up to date** | ✅ Enabled | Branch must be current with main |
-| **Require conversation resolution** | ✅ Enabled | All comments must be resolved |
-| **Require signed commits** | Optional | For enhanced security |
-| **Include administrators** | ✅ Enabled | Rules apply to everyone |
+| Rule | Configuration |
+|------|---------------|
+| **Pull Request Required** | ✅ Enabled |
+| **Required Approvals** | 1 |
+| **Dismiss Stale Reviews** | ✅ On push |
+| **Require Code Owner Review** | ✅ Enabled |
+| **Require Conversation Resolution** | ✅ Enabled |
+| **Required Status Checks** | Strict mode |
+| **Prevent Deletion** | ✅ Enabled |
+| **Prevent Force Push** | ✅ Enabled |
 
 ### Required Status Checks
 
-Add these status checks as required:
+The following CI jobs must pass before merging:
 
-- `Lint`
-- `Type Check`
-- `Test`
-- `Security Audit`
-- `CodeQL Analysis`
+- `Lint` - Ruff linter and formatter
+- `Type Check` - mypy type checking
+- `Test` - pytest test suite
+- `Security Audit` - pip-audit security scan
+
+### Bypass Actors
+
+No bypass actors configured - rules apply to everyone including administrators.
+
+## Why Rulesets over Branch Protection?
+
+Rulesets provide:
+- **Better organization** - Multiple rulesets with different targets
+- **More granular control** - Fine-tuned rules per pattern
+- **Easier management** - UI and API improvements
+- **Future-proof** - GitHub's recommended approach going forward
 
 ## Notes
 
 - The release workflow uses `actions/github-script` to auto-merge Release PRs
-- If branch protection blocks auto-merge, you may need to use a PAT with bypass permissions
+- If rulesets block auto-merge, configure bypass actors for the release bot
 - Or manually merge Release PRs when they're created
 
