@@ -1,10 +1,17 @@
 """Configuration settings for AnimaWatch MCP Server."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ViewportSize(TypedDict):
+    """Viewport size type compatible with Playwright."""
+
+    width: int
+    height: int
 
 
 class Settings(BaseSettings):
@@ -61,9 +68,9 @@ class Settings(BaseSettings):
     )
 
     @property
-    def video_size(self) -> dict[str, int]:
-        """Return video size as dict for Playwright."""
-        return {"width": self.video_width, "height": self.video_height}
+    def video_size(self) -> ViewportSize:
+        """Return video size as TypedDict for Playwright compatibility."""
+        return ViewportSize(width=self.video_width, height=self.video_height)
 
 
 # Global settings instance

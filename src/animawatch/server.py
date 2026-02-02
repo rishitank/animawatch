@@ -22,7 +22,7 @@ from mcp.server.session import ServerSession
 
 from .browser import BrowserRecorder
 from .config import settings
-from .vision import VisionProvider, get_vision_provider  # noqa: F401
+from .vision import VisionProvider, get_vision_provider
 
 # =============================================================================
 # Application Context (Lifespan Management)
@@ -242,7 +242,7 @@ async def watch(
     if save_recording:
         app_ctx.recordings[result_id] = video_path
     else:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             video_path.unlink()
 
     app_ctx.analyses[result_id] = analysis
@@ -292,7 +292,7 @@ async def screenshot(
     with open(screenshot_path, "rb") as f:
         image_data = f.read()
 
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError):
         screenshot_path.unlink()
 
     return Image(data=image_data, format="png")
@@ -394,7 +394,7 @@ async def check_accessibility(
     prompt = accessibility_check()
     analysis = await vision.analyze_image(screenshot_path, prompt)
 
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError):
         screenshot_path.unlink()
 
     result_id = str(uuid.uuid4())[:8]

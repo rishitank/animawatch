@@ -1,6 +1,7 @@
 """Browser automation and video recording using Playwright for AnimaWatch."""
 
 import asyncio
+import os
 import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -60,9 +61,9 @@ class BrowserRecorder:
             raise RuntimeError("Browser not initialized")
 
         context = await self._browser.new_context(
-            viewport={"width": settings.video_width, "height": settings.video_height},
+            viewport=settings.video_size,
             record_video_dir=str(video_dir),
-            record_video_size={"width": settings.video_width, "height": settings.video_height},
+            record_video_size=settings.video_size,
         )
 
         page = await context.new_page()
@@ -124,15 +125,15 @@ class BrowserRecorder:
         if self._browser is None:
             raise RuntimeError("Browser not initialized")
 
-        context = await self._browser.new_context(
-            viewport={"width": settings.video_width, "height": settings.video_height}
-        )
+        context = await self._browser.new_context(viewport=settings.video_size)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="networkidle")
 
-            screenshot_path = Path(tempfile.mktemp(suffix=".png"))
+            fd, tmp_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            screenshot_path = Path(tmp_path)
             await page.screenshot(path=str(screenshot_path), full_page=full_page)
 
             return screenshot_path

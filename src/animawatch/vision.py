@@ -1,8 +1,8 @@
 """Vision AI providers for analyzing videos and screenshots."""
 
+import asyncio
 import base64
 import contextlib
-import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -44,7 +44,7 @@ class GeminiProvider(VisionProvider):
 
         # Wait for processing
         while video_file.state.name == "PROCESSING":
-            time.sleep(1)
+            await asyncio.sleep(1)
             video_file = genai.get_file(video_file.name)  # type: ignore[attr-defined]
 
         if video_file.state.name == "FAILED":
@@ -54,7 +54,7 @@ class GeminiProvider(VisionProvider):
         response: Any = self.model.generate_content([video_file, prompt])
 
         # Clean up uploaded file
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             genai.delete_file(video_file.name)  # type: ignore[attr-defined]
 
         return str(response.text)
