@@ -1,2 +1,1 @@
 """AnimaWatch test suite."""
-

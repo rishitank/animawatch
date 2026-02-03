@@ -30,8 +30,7 @@ class TestSettings:
         """Test that environment variables override defaults."""
         monkeypatch.setenv("BROWSER_HEADLESS", "false")
         monkeypatch.setenv("MAX_RECORDING_DURATION", "60")
-        
+
         settings = Settings()
         assert settings.browser_headless is False
         assert settings.max_recording_duration == 60
-
