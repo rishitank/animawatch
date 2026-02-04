@@ -212,7 +212,7 @@ class TestTools:
             )
 
             assert "Animation Analysis" in result
-            assert "example.com" in result
+            assert "https://example.com" in result
             mock_app_context.browser.record_interaction.assert_called_once()
             mock_app_context.vision.analyze_video.assert_called_once()
 
