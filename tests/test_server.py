@@ -206,15 +206,15 @@ class TestTools:
             mock_uuid.return_value = MagicMock(hex="abc12345")
             mock_uuid.return_value.__str__ = lambda self: "abc12345-6789-0123-4567-890123456789"
 
-            test_url = "https://example.com"
             result = await watch(
-                url=test_url,
+                url="https://example.com",
                 ctx=mock_ctx,
             )
 
-            # Check for the expected output header format
-            expected_header = f"Animation Analysis for {test_url}"
-            assert expected_header in result
+            # Verify the result contains expected structural elements
+            assert result.startswith("## 🎬 Animation Analysis")
+            assert "Analysis ID" in result
+            assert "abc12345" in result  # Check the mocked UUID is present
             mock_app_context.browser.record_interaction.assert_called_once()
             mock_app_context.vision.analyze_video.assert_called_once()
 
