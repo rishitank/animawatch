@@ -195,9 +195,7 @@ class TestOllamaProvider:
         provider.client = mock_client
         provider.model = "qwen2.5-vl:7b"
 
-        with pytest.raises(
-            NotImplementedError, match="Ollama doesn't support direct video"
-        ):
+        with pytest.raises(NotImplementedError, match="Ollama doesn't support direct video"):
             await provider.analyze_video(Path("/tmp/test.webm"), "Analyze")
 
     @pytest.mark.asyncio
@@ -256,4 +254,3 @@ class TestGetVisionProvider:
 
             # Check class name due to module reloading during mocking
             assert type(provider).__name__ == "OllamaProvider"
-

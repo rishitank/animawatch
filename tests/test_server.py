@@ -271,9 +271,7 @@ class TestTools:
         assert "not found" in result
 
     @pytest.mark.asyncio
-    async def test_record_tool(
-        self, mock_ctx: MagicMock, mock_app_context: AppContext
-    ) -> None:
+    async def test_record_tool(self, mock_ctx: MagicMock, mock_app_context: AppContext) -> None:
         """Test record tool records without analysis."""
         from animawatch.server import record
 
@@ -302,4 +300,3 @@ class TestTools:
         assert "Accessibility Analysis" in result
         mock_app_context.browser.take_screenshot.assert_called_once()
         mock_app_context.vision.analyze_image.assert_called_once()
-

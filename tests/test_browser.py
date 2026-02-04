@@ -198,9 +198,7 @@ class TestBrowserRecorderActions:
         await recorder._perform_action(mock_page, action)
 
     @pytest.mark.asyncio
-    async def test_perform_action_click_without_selector(
-        self, recorder: BrowserRecorder
-    ) -> None:
+    async def test_perform_action_click_without_selector(self, recorder: BrowserRecorder) -> None:
         """Test click action without selector does nothing."""
         mock_page = AsyncMock()
         action = {"type": "click"}
@@ -208,4 +206,3 @@ class TestBrowserRecorderActions:
         await recorder._perform_action(mock_page, action)
 
         mock_page.click.assert_not_called()
-
