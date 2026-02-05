@@ -40,14 +40,10 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-aiofiles" },
 ]
 ollama = [
     { name = "ollama" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "types-aiofiles" },
 ]
 
 [package.metadata]
@@ -68,11 +64,9 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
+    { name = "types-aiofiles", marker = "extra == 'dev'", specifier = ">=25.1.0.20251011" },
 ]
 provides-extras = ["dev", "ollama"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "types-aiofiles", specifier = ">=25.1.0.20251011" }]
 
 [[package]]
 name = "annotated-types"

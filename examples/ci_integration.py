@@ -34,8 +34,8 @@ class TestResult:
     url: str
     passed: bool
     score: float  # 0.0 to 1.0
-    issues_found: int
-    critical_issues: int
+    issues_found: int | None  # None if parsing failed
+    critical_issues: int | None  # None if parsing failed
     summary: str
     details: str
 
@@ -121,13 +121,13 @@ Check for: layout problems, broken styling, accessibility issues, visual artifac
             )
 
         except (json.JSONDecodeError, KeyError, ValueError):
-            # If parsing fails, return a conservative result
+            # If parsing fails, return a conservative result with None for parsed fields
             return TestResult(
                 url=url,
                 passed=False,
                 score=0.5,
-                issues_found=-1,
-                critical_issues=-1,
+                issues_found=None,
+                critical_issues=None,
                 summary="Could not parse AI response",
                 details=analysis,
             )

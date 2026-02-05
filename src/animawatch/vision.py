@@ -35,9 +35,6 @@ VISION_RETRY_CONFIG = RetryConfig(
     retry_exceptions=(ConnectionError, TimeoutError, OSError),
 )
 
-# Maximum time to wait for video processing (5 minutes)
-MAX_PROCESSING_SECONDS = 300
-
 
 class VisionProvider(ABC):
     """Abstract base class for vision AI providers."""

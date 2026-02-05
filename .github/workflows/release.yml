@@ -52,6 +52,11 @@ jobs:
               prs = [];
             }
             for (const pr of prs) {
+              // Validate pr.number before using it
+              if (!pr || typeof pr.number !== 'number') {
+                core.warning(`Skipping invalid PR entry: ${JSON.stringify(pr)}`);
+                continue;
+              }
               const prNumber = pr.number;
               try {
                 await github.rest.pulls.merge({

@@ -156,8 +156,8 @@ def with_retry(
     def decorator(func: F) -> F:
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            # Check circuit breaker
-            if circuit_breaker and circuit_breaker.is_open:
+            # Check circuit breaker using async-safe method
+            if circuit_breaker and await circuit_breaker.async_is_open():
                 raise CircuitOpenError(f"Circuit breaker {circuit_breaker.name} is open")
 
             last_exception: Exception | None = None
@@ -166,14 +166,14 @@ def with_retry(
                 try:
                     result = await func(*args, **kwargs)
                     if circuit_breaker:
-                        circuit_breaker.record_success()
+                        await circuit_breaker.async_record_success()
                     return result
 
                 except config.retry_exceptions as e:
                     last_exception = e
 
                     if circuit_breaker:
-                        circuit_breaker.record_failure()
+                        await circuit_breaker.async_record_failure()
 
                     if attempt < config.max_retries:
                         delay = calculate_delay(attempt, config)
