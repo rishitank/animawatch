@@ -38,8 +38,8 @@ class GeminiProvider(VisionProvider):
             raise ValueError(
                 "GEMINI_API_KEY not set. Get a free key at https://aistudio.google.com/"
             )
-        self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model_name = settings.vision_model
+        self.client: genai.Client = genai.Client(api_key=settings.gemini_api_key)
+        self.model_name: str = settings.vision_model
 
     async def analyze_video(self, video_path: Path, prompt: str) -> str:
         """Analyze video using Gemini's video understanding."""
