@@ -14,7 +14,7 @@ import mimetypes
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import aiofiles
 from google import genai
@@ -34,6 +34,19 @@ VISION_RETRY_CONFIG = RetryConfig(
     max_delay=30.0,
     retry_exceptions=(ConnectionError, TimeoutError, OSError),
 )
+
+
+# TypedDict for Ollama API response to avoid Any type leaks
+class OllamaMessage(TypedDict):
+    """Ollama message structure in chat response."""
+
+    content: str
+
+
+class OllamaResponse(TypedDict):
+    """Ollama chat response structure."""
+
+    message: OllamaMessage
 
 
 class VisionProvider(ABC):
@@ -84,7 +97,11 @@ class GeminiProvider(VisionProvider):
         ):
             # Upload the video file using async API
             video_file = await self.client.aio.files.upload(file=str(video_path))
-            file_name = video_file.name or ""
+
+            # Validate file name is present
+            if not video_file.name:
+                raise RuntimeError("Uploaded video file name not available")
+            file_name = video_file.name
 
             # Wait for processing with timeout
             start_time = time.monotonic()
@@ -207,7 +224,7 @@ class OllamaProvider(VisionProvider):
             async with aiofiles.open(image_path, "rb") as f:
                 image_data = base64.b64encode(await f.read()).decode("utf-8")
 
-            response: dict[str, Any] = await self.client.chat(
+            response: OllamaResponse = await self.client.chat(
                 model=self.model,
                 messages=[
                     {

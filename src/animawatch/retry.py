@@ -10,29 +10,40 @@ import asyncio
 import functools
 import random
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, TypeVar
+from collections.abc import Callable, Coroutine
+from typing import Any, ParamSpec, TypeVar
+
+from pydantic import BaseModel, Field, model_validator
 
 from .logging import log_extra, logger
 
-F = TypeVar("F", bound=Callable[..., Any])
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
-@dataclass
-class RetryConfig:
-    """Configuration for retry behavior."""
+class RetryConfig(BaseModel):
+    """Configuration for retry behavior with validation."""
 
-    max_retries: int = 3
-    base_delay: float = 1.0  # Initial delay in seconds
-    max_delay: float = 30.0  # Maximum delay in seconds
-    exponential_base: float = 2.0  # Exponential backoff multiplier
-    jitter: float = 0.5  # Random jitter factor (0-1)
-    retry_exceptions: tuple[type[Exception], ...] = (
-        ConnectionError,
-        TimeoutError,
-        OSError,
+    max_retries: int = Field(default=3, ge=0, description="Maximum number of retries")
+    base_delay: float = Field(default=1.0, ge=0, description="Initial delay in seconds")
+    max_delay: float = Field(default=30.0, ge=0, description="Maximum delay in seconds")
+    exponential_base: float = Field(default=2.0, gt=1, description="Exponential backoff multiplier")
+    jitter: float = Field(default=0.5, ge=0, le=1, description="Random jitter factor (0-1)")
+    retry_exceptions: tuple[type[Exception], ...] = Field(
+        default=(ConnectionError, TimeoutError, OSError),
+        description="Exceptions that trigger a retry",
     )
+
+    model_config = {"frozen": False, "arbitrary_types_allowed": True}
+
+    @model_validator(mode="after")
+    def validate_delays(self) -> "RetryConfig":
+        """Ensure max_delay >= base_delay."""
+        if self.max_delay < self.base_delay:
+            raise ValueError(
+                f"max_delay ({self.max_delay}) must be >= base_delay ({self.base_delay})"
+            )
+        return self
 
 
 class CircuitBreaker:
@@ -142,7 +153,7 @@ def calculate_delay(
 def with_retry(
     config: RetryConfig | None = None,
     circuit_breaker: CircuitBreaker | None = None,
-) -> Callable[[F], F]:
+) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], Callable[P, Coroutine[Any, Any, R]]]:
     """Decorator that adds retry logic with optional circuit breaker.
 
     Usage:
@@ -153,9 +164,11 @@ def with_retry(
     if config is None:
         config = RetryConfig()
 
-    def decorator(func: F) -> F:
+    def decorator(
+        func: Callable[P, Coroutine[Any, Any, R]],
+    ) -> Callable[P, Coroutine[Any, Any, R]]:
         @functools.wraps(func)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             # Check circuit breaker using async-safe method
             if circuit_breaker and await circuit_breaker.async_is_open():
                 raise CircuitOpenError(f"Circuit breaker {circuit_breaker.name} is open")
@@ -191,7 +204,7 @@ def with_retry(
                 raise last_exception
             raise RuntimeError("Unexpected retry loop exit")
 
-        return async_wrapper  # type: ignore[return-value]
+        return async_wrapper
 
     return decorator
 

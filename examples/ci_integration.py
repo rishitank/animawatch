@@ -60,6 +60,7 @@ async def run_visual_test(url: str, threshold: float = 0.8) -> TestResult:
     vision = get_vision_provider()
     screenshot_path: Path | None = None
 
+    # Outer exception handler for any unhandled runtime errors
     try:
         await browser.start()
 
@@ -105,6 +106,11 @@ Check for: layout problems, broken styling, accessibility issues, visual artifac
 
             result_data = json.loads(json_str.strip())
             score = float(result_data.get("score", 0.5))
+
+            # Validate score is in the documented 0.0-1.0 range
+            if not 0.0 <= score <= 1.0:
+                raise ValueError(f"score must be between 0.0 and 1.0, got {score}")
+
             issues = result_data.get("issues", [])
             summary = result_data.get("summary", "Analysis complete")
 
@@ -131,6 +137,18 @@ Check for: layout problems, broken styling, accessibility issues, visual artifac
                 summary="Could not parse AI response",
                 details=analysis,
             )
+
+    except Exception as e:
+        # Outer exception handler for any unhandled runtime errors
+        return TestResult(
+            url=url,
+            passed=False,
+            score=0.5,
+            issues_found=None,
+            critical_issues=None,
+            summary="Error during visual analysis",
+            details=str(e),
+        )
 
     finally:
         if screenshot_path is not None and screenshot_path.exists():
