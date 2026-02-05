@@ -42,6 +42,8 @@ class CircuitBreaker:
     - CLOSED: Normal operation, requests pass through
     - OPEN: Circuit is open, requests fail immediately
     - HALF_OPEN: Testing if service recovered
+
+    Thread-safe for use in async contexts.
     """
 
     def __init__(
@@ -56,27 +58,42 @@ class CircuitBreaker:
         self._failures = 0
         self._last_failure_time: float = 0
         self._state = "CLOSED"
+        self._lock = asyncio.Lock()
 
     @property
     def is_open(self) -> bool:
-        """Check if circuit is open (blocking requests)."""
+        """Check if circuit is open (blocking requests).
+
+        Note: This is a synchronous check for use in non-async contexts.
+        For async contexts, use async_is_open().
+        """
         if self._state == "OPEN":
-            # Check if recovery timeout has passed
-            if time.time() - self._last_failure_time >= self.recovery_timeout:
+            # Check if recovery timeout has passed (using monotonic clock)
+            if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
                 self._state = "HALF_OPEN"
                 return False
             return True
         return False
+
+    async def async_is_open(self) -> bool:
+        """Thread-safe check if circuit is open (for async contexts)."""
+        async with self._lock:
+            return self.is_open
 
     def record_success(self) -> None:
         """Record a successful request."""
         self._failures = 0
         self._state = "CLOSED"
 
+    async def async_record_success(self) -> None:
+        """Thread-safe record of successful request."""
+        async with self._lock:
+            self.record_success()
+
     def record_failure(self) -> None:
         """Record a failed request."""
         self._failures += 1
-        self._last_failure_time = time.time()
+        self._last_failure_time = time.monotonic()
 
         if self._failures >= self.failure_threshold:
             self._state = "OPEN"
@@ -85,6 +102,20 @@ class CircuitBreaker:
                 failures=self._failures,
                 threshold=self.failure_threshold,
             )
+
+    async def async_record_failure(self) -> None:
+        """Thread-safe record of failed request."""
+        async with self._lock:
+            self.record_failure()
+
+    def reset(self) -> None:
+        """Reset the circuit breaker to initial state.
+
+        Useful for testing to clear shared state between tests.
+        """
+        self._failures = 0
+        self._last_failure_time = 0
+        self._state = "CLOSED"
 
 
 class CircuitOpenError(Exception):

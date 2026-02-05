@@ -41,16 +41,21 @@ async def test_workflow(steps: list[WorkflowStep]) -> list[dict[str, str]]:
 
     try:
         await browser.start()
+        current_url: str | None = None
 
         for i, step in enumerate(steps, 1):
             print(f"\n🔄 Step {i}/{len(steps)}: {step.name}")
 
             # Determine the URL for this step
-            url = step.url if step.url else "about:blank"
+            if step.url:
+                current_url = step.url
+            elif current_url is None:
+                raise ValueError(f"Step {i} ({step.name}) has no URL and no previous URL to use")
+            # If step.url is None, we keep using current_url from previous step
 
             # Record the interaction
             video_path = await browser.record_interaction(
-                url=url,
+                url=current_url,
                 actions=step.actions,
                 wait_time=step.wait_time,
             )
@@ -91,7 +96,7 @@ Report any issues with severity and recommendations."""
             results.append(
                 {
                     "step": step.name,
-                    "url": url,
+                    "url": current_url,
                     "analysis": analysis,
                 }
             )

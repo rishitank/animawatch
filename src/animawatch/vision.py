@@ -10,10 +10,13 @@ Includes:
 import asyncio
 import base64
 import contextlib
+import mimetypes
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+import aiofiles
 from google import genai
 from google.genai import types
 
@@ -84,9 +87,9 @@ class GeminiProvider(VisionProvider):
             file_name = video_file.name or ""
 
             # Wait for processing with timeout
-            start_time = asyncio.get_event_loop().time()
+            start_time = time.monotonic()
             while video_file.state and video_file.state.name == "PROCESSING":
-                elapsed = asyncio.get_event_loop().time() - start_time
+                elapsed = time.monotonic() - start_time
                 if elapsed > MAX_PROCESSING_SECONDS:
                     raise TimeoutError(
                         f"Video processing timed out after {MAX_PROCESSING_SECONDS}s "
@@ -98,9 +101,13 @@ class GeminiProvider(VisionProvider):
             if video_file.state and video_file.state.name == "FAILED":
                 raise RuntimeError(f"Video processing failed: {video_file.state.name}")
 
+            # Validate video URI before creating Part
+            if not video_file.uri:
+                raise RuntimeError(f"Video file URI not available for: {file_name}")
+
             # Generate analysis
             video_part = types.Part.from_uri(
-                file_uri=video_file.uri or "",
+                file_uri=video_file.uri,
                 mime_type="video/webm",
             )
             prompt_part = types.Part.from_text(text=prompt)
@@ -111,7 +118,8 @@ class GeminiProvider(VisionProvider):
             )
 
             # Clean up uploaded file (file may already be deleted or not accessible)
-            with contextlib.suppress(FileNotFoundError, Exception):
+            # Suppress only expected errors: file not found or permission denied
+            with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
                 await self.client.aio.files.delete(name=file_name)
 
             result = str(response.text) if response.text else ""
@@ -126,13 +134,19 @@ class GeminiProvider(VisionProvider):
             image_path=str(image_path),
             prompt_length=len(prompt),
         ):
-            with open(image_path, "rb") as f:
-                image_data = f.read()
+            # Use async file I/O to avoid blocking the event loop
+            async with aiofiles.open(image_path, "rb") as f:
+                image_data = await f.read()
+
+            # Detect MIME type from file extension
+            mime_type, _ = mimetypes.guess_type(str(image_path))
+            if mime_type is None:
+                mime_type = "image/png"  # fallback
 
             # Use Part.from_bytes for image data
             image_part = types.Part.from_bytes(
                 data=image_data,
-                mime_type="image/png",
+                mime_type=mime_type,
             )
             prompt_part = types.Part.from_text(text=prompt)
             contents: list[types.Part] = [image_part, prompt_part]
@@ -157,6 +171,9 @@ class OllamaProvider(VisionProvider):
         try:
             import ollama
 
+            # NOTE: Using Any type for ollama client because the ollama package
+            # lacks proper type stubs. TODO: Add proper typing when ollama publishes stubs
+            # or create a Protocol interface for the methods we use.
             self.client: Any = ollama.AsyncClient(host=settings.ollama_host)
             self.model = settings.ollama_model
             log_extra(
@@ -186,8 +203,9 @@ class OllamaProvider(VisionProvider):
             image_path=str(image_path),
             prompt_length=len(prompt),
         ):
-            with open(image_path, "rb") as f:
-                image_data = base64.b64encode(f.read()).decode("utf-8")
+            # Use async file I/O to avoid blocking the event loop
+            async with aiofiles.open(image_path, "rb") as f:
+                image_data = base64.b64encode(await f.read()).decode("utf-8")
 
             response: dict[str, Any] = await self.client.chat(
                 model=self.model,

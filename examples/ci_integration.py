@@ -49,7 +49,13 @@ async def run_visual_test(url: str, threshold: float = 0.8) -> TestResult:
 
     Returns:
         Structured test result
+
+    Raises:
+        ValueError: If threshold is not between 0.0 and 1.0
     """
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("threshold must be between 0.0 and 1.0")
+
     browser = BrowserRecorder()
     vision = get_vision_provider()
     screenshot_path: Path | None = None

@@ -5,16 +5,19 @@ Example scripts demonstrating how to use AnimaWatch programmatically.
 ## Prerequisites
 
 1. Install AnimaWatch and its dependencies:
+
    ```bash
-   cd ~/github/animawatch
+   cd /path/to/animawatch
    uv sync
    uv run playwright install chromium
    ```
 
 2. Set up your Gemini API key (free):
+
    ```bash
    export GEMINI_API_KEY="your-api-key-here"
    ```
+
    Get a free key at [Google AI Studio](https://aistudio.google.com/).
 
 ## Examples
