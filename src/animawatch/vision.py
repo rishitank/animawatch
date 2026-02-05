@@ -1,4 +1,11 @@
-"""Vision AI providers for analyzing videos and screenshots."""
+"""Vision AI providers for analyzing videos and screenshots.
+
+Includes:
+- GeminiProvider: Google Gemini vision with video and image support
+- OllamaProvider: Local Ollama for image analysis
+- Retry logic with exponential backoff
+- Structured logging and observability
+"""
 
 import asyncio
 import base64
@@ -11,9 +18,19 @@ from google import genai
 from google.genai import types
 
 from .config import settings
+from .logging import log_extra, timed_operation
+from .retry import RetryConfig, vision_circuit, with_retry
 
 # Maximum time to wait for video processing (5 minutes)
 MAX_PROCESSING_SECONDS = 300
+
+# Retry configuration for vision API calls
+VISION_RETRY_CONFIG = RetryConfig(
+    max_retries=3,
+    base_delay=1.0,
+    max_delay=30.0,
+    retry_exceptions=(ConnectionError, TimeoutError, OSError),
+)
 
 
 class VisionProvider(ABC):
@@ -31,7 +48,14 @@ class VisionProvider(ABC):
 
 
 class GeminiProvider(VisionProvider):
-    """Google Gemini vision provider (FREE tier available)."""
+    """Google Gemini vision provider (FREE tier available).
+
+    Features:
+    - Video and image analysis with Gemini's multimodal models
+    - Automatic retry with exponential backoff
+    - Structured logging for observability
+    - Circuit breaker to prevent cascading failures
+    """
 
     def __init__(self) -> None:
         if not settings.gemini_api_key:
@@ -40,68 +64,94 @@ class GeminiProvider(VisionProvider):
             )
         self.client: genai.Client = genai.Client(api_key=settings.gemini_api_key)
         self.model_name: str = settings.vision_model
+        log_extra(
+            "GeminiProvider initialized",
+            model=self.model_name,
+            provider="gemini",
+        )
 
+    @with_retry(VISION_RETRY_CONFIG, vision_circuit)
     async def analyze_video(self, video_path: Path, prompt: str) -> str:
         """Analyze video using Gemini's video understanding."""
-        # Upload the video file using async API
-        video_file = await self.client.aio.files.upload(file=str(video_path))
-        file_name = video_file.name or ""
+        async with timed_operation(
+            "analyze_video",
+            provider="gemini",
+            video_path=str(video_path),
+            prompt_length=len(prompt),
+        ):
+            # Upload the video file using async API
+            video_file = await self.client.aio.files.upload(file=str(video_path))
+            file_name = video_file.name or ""
 
-        # Wait for processing with timeout
-        start_time = asyncio.get_event_loop().time()
-        while video_file.state and video_file.state.name == "PROCESSING":
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > MAX_PROCESSING_SECONDS:
-                raise TimeoutError(
-                    f"Video processing timed out after {MAX_PROCESSING_SECONDS}s "
-                    f"for file: {file_name}"
-                )
-            await asyncio.sleep(1)
-            video_file = await self.client.aio.files.get(name=file_name)
+            # Wait for processing with timeout
+            start_time = asyncio.get_event_loop().time()
+            while video_file.state and video_file.state.name == "PROCESSING":
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed > MAX_PROCESSING_SECONDS:
+                    raise TimeoutError(
+                        f"Video processing timed out after {MAX_PROCESSING_SECONDS}s "
+                        f"for file: {file_name}"
+                    )
+                await asyncio.sleep(1)
+                video_file = await self.client.aio.files.get(name=file_name)
 
-        if video_file.state and video_file.state.name == "FAILED":
-            raise RuntimeError(f"Video processing failed: {video_file.state.name}")
+            if video_file.state and video_file.state.name == "FAILED":
+                raise RuntimeError(f"Video processing failed: {video_file.state.name}")
 
-        # Generate analysis
-        video_part = types.Part.from_uri(
-            file_uri=video_file.uri or "",
-            mime_type="video/webm",
-        )
-        prompt_part = types.Part.from_text(text=prompt)
-        contents: list[types.Part] = [video_part, prompt_part]
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=contents,  # type: ignore[arg-type]
-        )
+            # Generate analysis
+            video_part = types.Part.from_uri(
+                file_uri=video_file.uri or "",
+                mime_type="video/webm",
+            )
+            prompt_part = types.Part.from_text(text=prompt)
+            contents: list[types.Part] = [video_part, prompt_part]
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=contents,  # type: ignore[arg-type]
+            )
 
-        # Clean up uploaded file (file may already be deleted or not accessible)
-        with contextlib.suppress(FileNotFoundError, Exception):
-            await self.client.aio.files.delete(name=file_name)
+            # Clean up uploaded file (file may already be deleted or not accessible)
+            with contextlib.suppress(FileNotFoundError, Exception):
+                await self.client.aio.files.delete(name=file_name)
 
-        return str(response.text) if response.text else ""
+            result = str(response.text) if response.text else ""
+            return result
 
+    @with_retry(VISION_RETRY_CONFIG, vision_circuit)
     async def analyze_image(self, image_path: Path, prompt: str) -> str:
         """Analyze image using Gemini's vision capabilities."""
-        with open(image_path, "rb") as f:
-            image_data = f.read()
+        async with timed_operation(
+            "analyze_image",
+            provider="gemini",
+            image_path=str(image_path),
+            prompt_length=len(prompt),
+        ):
+            with open(image_path, "rb") as f:
+                image_data = f.read()
 
-        # Use Part.from_bytes for image data
-        image_part = types.Part.from_bytes(
-            data=image_data,
-            mime_type="image/png",
-        )
-        prompt_part = types.Part.from_text(text=prompt)
-        contents: list[types.Part] = [image_part, prompt_part]
+            # Use Part.from_bytes for image data
+            image_part = types.Part.from_bytes(
+                data=image_data,
+                mime_type="image/png",
+            )
+            prompt_part = types.Part.from_text(text=prompt)
+            contents: list[types.Part] = [image_part, prompt_part]
 
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=contents,  # type: ignore[arg-type]
-        )
-        return str(response.text) if response.text else ""
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=contents,  # type: ignore[arg-type]
+            )
+            return str(response.text) if response.text else ""
 
 
 class OllamaProvider(VisionProvider):
-    """Ollama local vision provider (100% FREE, runs locally)."""
+    """Ollama local vision provider (100% FREE, runs locally).
+
+    Features:
+    - Image analysis with local vision models
+    - No external API calls - fully private
+    - Automatic retry with exponential backoff
+    """
 
     def __init__(self) -> None:
         try:
@@ -109,6 +159,12 @@ class OllamaProvider(VisionProvider):
 
             self.client: Any = ollama.AsyncClient(host=settings.ollama_host)
             self.model = settings.ollama_model
+            log_extra(
+                "OllamaProvider initialized",
+                model=self.model,
+                host=settings.ollama_host,
+                provider="ollama",
+            )
         except ImportError as err:
             raise ImportError("Ollama package not installed. Run: pip install ollama") from err
 
@@ -121,22 +177,29 @@ class OllamaProvider(VisionProvider):
             "Use analyze_image with extracted frames or switch to Gemini."
         )
 
+    @with_retry(VISION_RETRY_CONFIG)
     async def analyze_image(self, image_path: Path, prompt: str) -> str:
         """Analyze image using Ollama's vision model."""
-        with open(image_path, "rb") as f:
-            image_data = base64.b64encode(f.read()).decode("utf-8")
+        async with timed_operation(
+            "analyze_image",
+            provider="ollama",
+            image_path=str(image_path),
+            prompt_length=len(prompt),
+        ):
+            with open(image_path, "rb") as f:
+                image_data = base64.b64encode(f.read()).decode("utf-8")
 
-        response: dict[str, Any] = await self.client.chat(
-            model=self.model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                    "images": [image_data],
-                }
-            ],
-        )
-        return str(response["message"]["content"])
+            response: dict[str, Any] = await self.client.chat(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [image_data],
+                    }
+                ],
+            )
+            return str(response["message"]["content"])
 
 
 def get_vision_provider() -> VisionProvider:

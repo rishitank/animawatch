@@ -32,22 +32,26 @@ jobs:
 
       # Auto-merge the Release PR so every merge to main triggers a release
       - name: Auto-merge Release PR
-        if: steps.release.outputs.pr
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
         uses: actions/github-script@v8
         with:
           script: |
-            const prNumber = ${{ steps.release.outputs.pr }};
-            try {
-              await github.rest.pulls.merge({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-                merge_method: 'squash'
-              });
-              core.info(`✅ Release PR #${prNumber} merged successfully`);
-            } catch (error) {
-              core.warning(`⚠️ Failed to auto-merge Release PR #${prNumber}: ${error.message}`);
-              core.warning('Manual merge may be required if there are conflicts or branch protection rules.');
+            // Parse the prs JSON output to get PR numbers
+            const prs = JSON.parse('${{ steps.release.outputs.prs }}' || '[]');
+            for (const pr of prs) {
+              const prNumber = pr.number;
+              try {
+                await github.rest.pulls.merge({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  merge_method: 'squash'
+                });
+                core.info(`✅ Release PR #${prNumber} merged successfully`);
+              } catch (error) {
+                core.warning(`⚠️ Failed to auto-merge Release PR #${prNumber}: ${error.message}`);
+                core.warning('Manual merge may be required if there are conflicts or branch protection rules.');
+              }
             }
 
   # Build and attach artifacts to the GitHub Release
