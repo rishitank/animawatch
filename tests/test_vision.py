@@ -18,8 +18,8 @@ class TestGeminiProvider:
             with pytest.raises(ValueError, match="GEMINI_API_KEY not set"):
                 GeminiProvider()
 
-    def test_init_with_api_key_configures_genai(self) -> None:
-        """Test that GeminiProvider configures genai with API key."""
+    def test_init_with_api_key_creates_client(self) -> None:
+        """Test that GeminiProvider creates a genai Client with API key."""
         with (
             patch("animawatch.vision.settings") as mock_settings,
             patch("animawatch.vision.genai") as mock_genai,
@@ -29,9 +29,8 @@ class TestGeminiProvider:
 
             provider = GeminiProvider()
 
-            mock_genai.configure.assert_called_once_with(api_key="test-api-key")
-            mock_genai.GenerativeModel.assert_called_once_with("gemini-2.0-flash")
-            assert provider.model is not None
+            mock_genai.Client.assert_called_once_with(api_key="test-api-key")
+            assert provider.model_name == "gemini-2.0-flash"
 
     @pytest.mark.asyncio
     async def test_analyze_video_uploads_and_processes(self) -> None:
@@ -47,22 +46,26 @@ class TestGeminiProvider:
             mock_video_file = MagicMock()
             mock_video_file.state.name = "ACTIVE"
             mock_video_file.name = "test-video"
-            mock_genai.upload_file.return_value = mock_video_file
+            mock_video_file.uri = "gs://test/video.webm"
 
-            # Mock model response
+            # Mock client and async methods
+            mock_client = MagicMock()
+            mock_client.aio.files.upload = AsyncMock(return_value=mock_video_file)
+            mock_client.aio.files.delete = AsyncMock()
+
             mock_response = MagicMock()
             mock_response.text = "Analysis result"
-            mock_model = MagicMock()
-            mock_model.generate_content.return_value = mock_response
-            mock_genai.GenerativeModel.return_value = mock_model
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            mock_genai.Client.return_value = mock_client
 
             provider = GeminiProvider()
             result = await provider.analyze_video(Path("/tmp/test.webm"), "Analyze this")
 
             assert result == "Analysis result"
-            mock_genai.upload_file.assert_called_once()
-            mock_model.generate_content.assert_called_once()
-            mock_genai.delete_file.assert_called_once_with("test-video")
+            mock_client.aio.files.upload.assert_called_once()
+            mock_client.aio.models.generate_content.assert_called_once()
+            mock_client.aio.files.delete.assert_called_once_with(name="test-video")
 
     @pytest.mark.asyncio
     async def test_analyze_video_handles_processing_state(self) -> None:
@@ -79,19 +82,23 @@ class TestGeminiProvider:
             processing_file = MagicMock()
             processing_file.state.name = "PROCESSING"
             processing_file.name = "test-video"
+            processing_file.uri = "gs://test/video.webm"
 
             active_file = MagicMock()
             active_file.state.name = "ACTIVE"
             active_file.name = "test-video"
+            active_file.uri = "gs://test/video.webm"
 
-            mock_genai.upload_file.return_value = processing_file
-            mock_genai.get_file.return_value = active_file
+            mock_client = MagicMock()
+            mock_client.aio.files.upload = AsyncMock(return_value=processing_file)
+            mock_client.aio.files.get = AsyncMock(return_value=active_file)
+            mock_client.aio.files.delete = AsyncMock()
 
             mock_response = MagicMock()
             mock_response.text = "Done"
-            mock_model = MagicMock()
-            mock_model.generate_content.return_value = mock_response
-            mock_genai.GenerativeModel.return_value = mock_model
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            mock_genai.Client.return_value = mock_client
 
             provider = GeminiProvider()
             result = await provider.analyze_video(Path("/tmp/test.webm"), "Analyze")
@@ -111,8 +118,11 @@ class TestGeminiProvider:
 
             failed_file = MagicMock()
             failed_file.state.name = "FAILED"
-            mock_genai.upload_file.return_value = failed_file
-            mock_genai.GenerativeModel.return_value = MagicMock()
+            failed_file.name = "test-video"
+
+            mock_client = MagicMock()
+            mock_client.aio.files.upload = AsyncMock(return_value=failed_file)
+            mock_genai.Client.return_value = mock_client
 
             provider = GeminiProvider()
 
@@ -120,8 +130,8 @@ class TestGeminiProvider:
                 await provider.analyze_video(Path("/tmp/test.webm"), "Analyze")
 
     @pytest.mark.asyncio
-    async def test_analyze_image_reads_and_encodes(self, tmp_path: Path) -> None:
-        """Test that analyze_image reads and base64 encodes the image."""
+    async def test_analyze_image_reads_and_processes(self, tmp_path: Path) -> None:
+        """Test that analyze_image reads image and calls generate_content."""
         # Create a test image file
         image_path = tmp_path / "test.png"
         image_path.write_bytes(b"fake image data")
@@ -135,15 +145,16 @@ class TestGeminiProvider:
 
             mock_response = MagicMock()
             mock_response.text = "Image analysis"
-            mock_model = MagicMock()
-            mock_model.generate_content.return_value = mock_response
-            mock_genai.GenerativeModel.return_value = mock_model
+
+            mock_client = MagicMock()
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+            mock_genai.Client.return_value = mock_client
 
             provider = GeminiProvider()
             result = await provider.analyze_image(image_path, "Analyze image")
 
             assert result == "Image analysis"
-            mock_model.generate_content.assert_called_once()
+            mock_client.aio.models.generate_content.assert_called_once()
 
 
 class TestOllamaProvider:
