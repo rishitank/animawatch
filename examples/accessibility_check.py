@@ -22,8 +22,11 @@ async def check_accessibility(url: str) -> str:
     Returns:
         The accessibility analysis result
     """
+    from pathlib import Path
+
     browser = BrowserRecorder()
     vision = get_vision_provider()
+    screenshot_path: Path | None = None
 
     try:
         await browser.start()
@@ -68,13 +71,12 @@ Rate overall accessibility (A, AA, AAA, or Failing) and provide specific recomme
 
         analysis = await vision.analyze_image(screenshot_path, prompt)
 
-        # Clean up
-        if screenshot_path.exists():
-            screenshot_path.unlink()
-
         return str(analysis)
 
     finally:
+        # Clean up temp screenshot
+        if screenshot_path is not None and screenshot_path.exists():
+            screenshot_path.unlink()
         await browser.stop()
 
 

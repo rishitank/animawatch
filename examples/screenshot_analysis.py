@@ -27,8 +27,11 @@ async def analyze_screenshot(
     Returns:
         The analysis result from the vision AI
     """
+    from pathlib import Path
+
     browser = BrowserRecorder()
     vision = get_vision_provider()
+    screenshot_path: Path | None = None
 
     try:
         await browser.start()
@@ -54,13 +57,12 @@ Also note what's done well."""
 
         analysis = await vision.analyze_image(screenshot_path, prompt)
 
-        # Clean up
-        if screenshot_path.exists():
-            screenshot_path.unlink()
-
         return str(analysis)
 
     finally:
+        # Clean up temp screenshot
+        if screenshot_path is not None and screenshot_path.exists():
+            screenshot_path.unlink()
         await browser.stop()
 
 

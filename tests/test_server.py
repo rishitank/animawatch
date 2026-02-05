@@ -1,6 +1,7 @@
 """Tests for AnimaWatch MCP server module."""
 
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -215,8 +216,8 @@ class TestTools:
             assert result.startswith("## 🎬 Animation Analysis")
             assert "Analysis ID" in result
             assert "abc12345" in result  # Check the mocked UUID is present
-            mock_app_context.browser.record_interaction.assert_called_once()  # type: ignore[attr-defined]
-            mock_app_context.vision.analyze_video.assert_called_once()  # type: ignore[attr-defined]
+            cast(AsyncMock, mock_app_context.browser.record_interaction).assert_called_once()
+            cast(AsyncMock, mock_app_context.vision.analyze_video).assert_called_once()
 
     @pytest.mark.asyncio
     async def test_watch_without_context_raises(self) -> None:
@@ -258,7 +259,7 @@ class TestTools:
         )
 
         assert "Video Analysis" in result
-        mock_app_context.vision.analyze_video.assert_called_once()  # type: ignore[attr-defined]
+        cast(AsyncMock, mock_app_context.vision.analyze_video).assert_called_once()
 
     @pytest.mark.asyncio
     async def test_analyze_video_not_found(self, mock_ctx: MagicMock) -> None:
@@ -283,9 +284,9 @@ class TestTools:
         )
 
         assert "Recording Complete" in result
-        mock_app_context.browser.record_interaction.assert_called_once()  # type: ignore[attr-defined]
+        cast(AsyncMock, mock_app_context.browser.record_interaction).assert_called_once()
         # Vision should NOT be called for record-only
-        mock_app_context.vision.analyze_video.assert_not_called()  # type: ignore[attr-defined]
+        cast(AsyncMock, mock_app_context.vision.analyze_video).assert_not_called()
 
     @pytest.mark.asyncio
     async def test_check_accessibility_tool(
@@ -300,5 +301,5 @@ class TestTools:
         )
 
         assert "Accessibility Analysis" in result
-        mock_app_context.browser.take_screenshot.assert_called_once()  # type: ignore[attr-defined]
-        mock_app_context.vision.analyze_image.assert_called_once()  # type: ignore[attr-defined]
+        cast(AsyncMock, mock_app_context.browser.take_screenshot).assert_called_once()
+        cast(AsyncMock, mock_app_context.vision.analyze_image).assert_called_once()

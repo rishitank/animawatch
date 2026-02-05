@@ -12,6 +12,9 @@ from google.genai import types
 
 from .config import settings
 
+# Maximum time to wait for video processing (5 minutes)
+MAX_PROCESSING_SECONDS = 300
+
 
 class VisionProvider(ABC):
     """Abstract base class for vision AI providers."""
@@ -44,8 +47,15 @@ class GeminiProvider(VisionProvider):
         video_file = await self.client.aio.files.upload(file=str(video_path))
         file_name = video_file.name or ""
 
-        # Wait for processing (check file state)
+        # Wait for processing with timeout
+        start_time = asyncio.get_event_loop().time()
         while video_file.state and video_file.state.name == "PROCESSING":
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > MAX_PROCESSING_SECONDS:
+                raise TimeoutError(
+                    f"Video processing timed out after {MAX_PROCESSING_SECONDS}s "
+                    f"for file: {file_name}"
+                )
             await asyncio.sleep(1)
             video_file = await self.client.aio.files.get(name=file_name)
 
@@ -64,8 +74,8 @@ class GeminiProvider(VisionProvider):
             contents=contents,  # type: ignore[arg-type]
         )
 
-        # Clean up uploaded file
-        with contextlib.suppress(Exception):
+        # Clean up uploaded file (file may already be deleted or not accessible)
+        with contextlib.suppress(FileNotFoundError, Exception):
             await self.client.aio.files.delete(name=file_name)
 
         return str(response.text) if response.text else ""

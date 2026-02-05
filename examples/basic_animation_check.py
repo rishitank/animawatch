@@ -26,6 +26,7 @@ async def check_animations(url: str, output_dir: Path | None = None) -> str:
     # Initialize browser recorder and vision provider
     browser = BrowserRecorder()
     vision = get_vision_provider()
+    video_path: Path | None = None
 
     try:
         # Start the browser
@@ -53,13 +54,12 @@ Report any issues with timestamps and severity."""
 
         analysis = await vision.analyze_video(video_path, prompt)
 
-        # Clean up video if no output dir specified
-        if output_dir is None and video_path.exists():
-            video_path.unlink()
-
         return str(analysis)
 
     finally:
+        # Clean up temp video if no output dir specified
+        if output_dir is None and video_path is not None and video_path.exists():
+            video_path.unlink()
         # Always clean up browser
         await browser.stop()
 
