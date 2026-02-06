@@ -38,6 +38,7 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
     "pip-audit>=2.7.0",
+    "types-aiofiles>=25.1.0.20251011",
 ]
 ollama = [
     "ollama>=0.3.0",
@@ -88,4 +89,3 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
-
