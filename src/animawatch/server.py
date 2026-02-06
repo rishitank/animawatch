@@ -234,8 +234,12 @@ async def watch(
     # Generate analysis prompt
     prompt = animation_diagnosis(focus)
 
-    # Analyze with vision AI
-    analysis = await vision.analyze_video(video_path, prompt)
+    # Analyze with vision AI (non-structured for backward compatibility)
+    analysis_result = await vision.analyze_video(video_path, prompt, structured=False)
+    # Handle both string and AnalysisResult return types
+    analysis = (
+        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
+    )
 
     # Store results if requested
     result_id = str(uuid.uuid4())[:8]
@@ -282,7 +286,10 @@ async def screenshot(
 
     # Analyze with vision AI
     prompt = page_analysis(focus)
-    analysis = await vision.analyze_image(screenshot_path, prompt)
+    analysis_result = await vision.analyze_image(screenshot_path, prompt, structured=False)
+    analysis = (
+        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
+    )
 
     # Store analysis
     result_id = str(uuid.uuid4())[:8]
@@ -320,7 +327,10 @@ async def analyze_video(
         return f"❌ Video not found: {video_path}"
 
     prompt = animation_diagnosis(focus)
-    analysis = await vision.analyze_video(path, prompt)
+    analysis_result = await vision.analyze_video(path, prompt, structured=False)
+    analysis = (
+        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
+    )
 
     result_id = str(uuid.uuid4())[:8]
     app_ctx.analyses[result_id] = analysis
@@ -392,7 +402,10 @@ async def check_accessibility(
     screenshot_path = await browser.take_screenshot(url, full_page=True)
 
     prompt = accessibility_check()
-    analysis = await vision.analyze_image(screenshot_path, prompt)
+    analysis_result = await vision.analyze_image(screenshot_path, prompt, structured=False)
+    analysis = (
+        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
+    )
 
     with contextlib.suppress(OSError):
         screenshot_path.unlink()

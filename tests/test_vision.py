@@ -5,7 +5,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from animawatch.cache import AnalysisCache, analysis_cache
+from animawatch.retry import vision_circuit
 from animawatch.vision import GeminiProvider, OllamaProvider, get_vision_provider
+
+
+@pytest.fixture(autouse=True)
+def reset_shared_state() -> None:
+    """Reset circuit breaker and cache before each test to avoid state pollution."""
+    vision_circuit.reset()
+    # Clear the global cache to avoid test pollution
+    analysis_cache._cache.clear()
 
 
 class TestGeminiProvider:
@@ -34,8 +44,12 @@ class TestGeminiProvider:
             assert provider is not None
 
     @pytest.mark.asyncio
-    async def test_analyze_video_uploads_and_processes(self) -> None:
+    async def test_analyze_video_uploads_and_processes(self, tmp_path: Path) -> None:
         """Test that analyze_video uploads video and waits for processing."""
+        # Create a real temp file for the cache to hash
+        video_path = tmp_path / "test.webm"
+        video_path.write_bytes(b"fake video data")
+
         with (
             patch("animawatch.vision.settings") as mock_settings,
             patch("animawatch.vision.genai") as mock_genai,
@@ -61,7 +75,7 @@ class TestGeminiProvider:
             mock_genai.Client.return_value = mock_client
 
             provider = GeminiProvider()
-            result = await provider.analyze_video(Path("/tmp/test.webm"), "Analyze this")
+            result = await provider.analyze_video(video_path, "Analyze this")
 
             assert result == "Analysis result"
             mock_client.aio.files.upload.assert_called_once()
@@ -69,8 +83,12 @@ class TestGeminiProvider:
             mock_client.aio.files.delete.assert_called_once_with(name="test-video")
 
     @pytest.mark.asyncio
-    async def test_analyze_video_handles_processing_state(self) -> None:
+    async def test_analyze_video_handles_processing_state(self, tmp_path: Path) -> None:
         """Test that analyze_video waits while video is processing."""
+        # Create a real temp file for the cache to hash
+        video_path = tmp_path / "test.webm"
+        video_path.write_bytes(b"fake video data")
+
         with (
             patch("animawatch.vision.settings") as mock_settings,
             patch("animawatch.vision.genai") as mock_genai,
@@ -102,14 +120,18 @@ class TestGeminiProvider:
             mock_genai.Client.return_value = mock_client
 
             provider = GeminiProvider()
-            result = await provider.analyze_video(Path("/tmp/test.webm"), "Analyze")
+            result = await provider.analyze_video(video_path, "Analyze")
 
             mock_sleep.assert_called_once_with(1)
             assert result == "Done"
 
     @pytest.mark.asyncio
-    async def test_analyze_video_raises_on_failed_state(self) -> None:
+    async def test_analyze_video_raises_on_failed_state(self, tmp_path: Path) -> None:
         """Test that analyze_video raises when processing fails."""
+        # Create a real temp file for the cache to hash
+        video_path = tmp_path / "test.webm"
+        video_path.write_bytes(b"fake video data")
+
         with (
             patch("animawatch.vision.settings") as mock_settings,
             patch("animawatch.vision.genai") as mock_genai,
@@ -128,7 +150,7 @@ class TestGeminiProvider:
             provider = GeminiProvider()
 
             with pytest.raises(RuntimeError, match="Video processing failed"):
-                await provider.analyze_video(Path("/tmp/test.webm"), "Analyze")
+                await provider.analyze_video(video_path, "Analyze")
 
     @pytest.mark.asyncio
     async def test_analyze_image_reads_and_processes(self, tmp_path: Path) -> None:
@@ -224,6 +246,7 @@ class TestOllamaProvider:
         provider = OllamaProvider.__new__(OllamaProvider)
         provider.client = mock_client
         provider.model = "qwen2.5-vl:7b"
+        provider._cache = AnalysisCache()
 
         with pytest.raises(NotImplementedError, match="Ollama doesn't support direct video"):
             await provider.analyze_video(Path("/tmp/test.webm"), "Analyze")
@@ -240,6 +263,7 @@ class TestOllamaProvider:
         provider = OllamaProvider.__new__(OllamaProvider)
         provider.client = mock_client
         provider.model = "qwen2.5-vl:7b"
+        provider._cache = AnalysisCache()
 
         result = await provider.analyze_image(image_path, "Analyze this")
 
