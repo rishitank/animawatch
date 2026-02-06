@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/rishitank/animawatch/compare/v0.3.0...v0.3.1) (2026-02-06)
+
+
+### 🚀 Features
+
+* add comprehensive feature upgrades ([#8](https://github.com/rishitank/animawatch/issues/8)) ([e12ce55](https://github.com/rishitank/animawatch/commit/e12ce55b87fa115c0fb733216f4ebe4bb601f10e))
+* integrate new modules as MCP tools ([#12](https://github.com/rishitank/animawatch/issues/12)) ([5ae50b2](https://github.com/rishitank/animawatch/commit/5ae50b2e6936ed9352fe1d72fb3e6b88265a97f2))
+
+
+### ♻️ Refactoring
+
+* remove modules that don't fit core debugging use case ([#10](https://github.com/rishitank/animawatch/issues/10)) ([6a828bc](https://github.com/rishitank/animawatch/commit/6a828bc57b3ecdfc3d8f1835cef3aaee30ed6631))
+
+
+### 🧪 Tests
+
+* add comprehensive tests for new modules ([#11](https://github.com/rishitank/animawatch/issues/11)) ([0367c7d](https://github.com/rishitank/animawatch/commit/0367c7df06d9d5de3fe542362c8be051d2512182))
+
 ## [0.3.0](https://github.com/rishitank/animawatch/compare/v0.2.0...v0.3.0) (2026-02-06)
 
 
