@@ -22,6 +22,11 @@ from mcp.server.session import ServerSession
 
 from .browser import BrowserRecorder
 from .config import settings
+from .consensus import analyze_with_consensus as run_consensus_analysis
+from .devices import DEVICES, DeviceCategory, get_device
+from .diff import compare_images
+from .fps import analyze_video_fps, generate_fps_report
+from .metrics import extract_performance_metrics, generate_metrics_report
 from .vision import VisionProvider, get_vision_provider
 
 # =============================================================================
@@ -67,11 +72,27 @@ It can:
 - Record browser interactions and analyze them for animation issues
 - Detect jank, stuttering, visual artifacts, timing problems
 - Take screenshots and analyze static pages
+- Emulate mobile/tablet devices for responsive testing
+- Compare screenshots to detect visual regressions
+- Analyze FPS and frame timing for performance issues
+- Measure Core Web Vitals (LCP, FCP, CLS, TTFB)
+- Use multi-model consensus for higher accuracy
 - Store recordings and analysis results as accessible resources
 
-Use the `watch` tool to record and analyze animations.
-Use the `screenshot` tool for static page analysis.
-Access previous recordings and analyses via resources.""",
+**Core Tools:**
+- `watch` - Record and analyze animations
+- `screenshot` - Static page analysis
+- `check_accessibility` - Accessibility audit
+
+**Device & Performance Tools:**
+- `list_devices` - List available device profiles
+- `watch_with_device` - Test on mobile/tablet viewports
+- `analyze_fps` - FPS consistency and jank detection
+- `get_performance_metrics` - Core Web Vitals
+
+**Comparison & Accuracy Tools:**
+- `compare_screenshots` - Visual diff detection
+- `analyze_with_consensus_tool` - Multi-model agreement""",
 )
 
 
@@ -414,6 +435,284 @@ async def check_accessibility(
     app_ctx.analyses[result_id] = analysis
 
     return f"## ♿ Accessibility Analysis for {url}\n\n**Analysis ID**: `{result_id}`\n\n{analysis}"
+
+
+# =============================================================================
+# New Tools: Device Emulation, Diff, FPS, Metrics, Consensus
+# =============================================================================
+
+
+@mcp.tool()
+async def list_devices(category: str | None = None) -> str:
+    """List available device profiles for emulation.
+
+    Args:
+        category: Filter by category: "mobile", "tablet", or "desktop" (default: all)
+    """
+    cat = None
+    if category:
+        try:
+            cat = DeviceCategory(category.lower())
+        except ValueError:
+            return f"❌ Invalid category '{category}'. Use: mobile, tablet, or desktop"
+
+    lines = ["## 📱 Available Device Profiles\n"]
+    if cat:
+        lines.append(f"**Category**: {cat.value}\n")
+
+    for key, profile in DEVICES.items():
+        if cat and profile.category != cat:
+            continue
+        lines.append(f"- **{key}**: {profile.name}")
+        lines.append(f"  - Viewport: {profile.width}x{profile.height}")
+        lines.append(f"  - Scale: {profile.device_scale_factor}x")
+        lines.append(f"  - Touch: {'Yes' if profile.has_touch else 'No'}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def watch_with_device(
+    url: str,
+    device: str,
+    actions: list[dict[str, Any]] | None = None,
+    wait_time: float = 3.0,
+    focus: str = "all",
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Watch a web page with device emulation.
+
+    Emulates a specific device (mobile, tablet, etc.) while recording and
+    analyzing animations. Useful for testing responsive animations.
+
+    Args:
+        url: URL of the page to watch
+        device: Device name (e.g., "iphone_15_pro", "ipad_pro_12", "pixel_8")
+        actions: Optional list of actions to perform
+        wait_time: Seconds to wait after actions
+        focus: Focus area for analysis
+    """
+    if ctx is None:
+        raise RuntimeError("Context is required")
+
+    profile = get_device(device)
+    if profile is None:
+        available = ", ".join(DEVICES.keys())
+        return f"❌ Device '{device}' not found.\n\nAvailable devices: {available}"
+
+    app_ctx = ctx.request_context.lifespan_context
+    browser = app_ctx.browser
+    vision = app_ctx.vision
+
+    # Record with device emulation (browser handles the profile)
+    video_path = await browser.record_interaction(
+        url=url,
+        actions=actions,
+        wait_time=wait_time,
+        device=device,
+    )
+
+    prompt = animation_diagnosis(focus)
+    analysis_result = await vision.analyze_video(video_path, prompt, structured=False)
+    analysis = (
+        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
+    )
+
+    result_id = str(uuid.uuid4())[:8]
+    app_ctx.analyses[result_id] = analysis
+
+    with contextlib.suppress(OSError):
+        video_path.unlink()
+
+    output = "## 📱 Device Animation Analysis\n\n"
+    output += f"**Device**: {profile.name} ({profile.width}x{profile.height})\n"
+    output += f"**URL**: {url}\n"
+    output += f"**Analysis ID**: `{result_id}`\n\n"
+    output += analysis
+
+    return output
+
+
+@mcp.tool()
+async def compare_screenshots(
+    url1: str,
+    url2: str,
+    threshold: int = 10,
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Compare screenshots of two pages/states for visual differences.
+
+    Useful for detecting visual regressions between deployments or
+    comparing before/after states.
+
+    Args:
+        url1: First URL (before)
+        url2: Second URL (after)
+        threshold: Pixel difference threshold (0-255, default 10)
+    """
+    if ctx is None:
+        raise RuntimeError("Context is required")
+
+    app_ctx = ctx.request_context.lifespan_context
+    browser = app_ctx.browser
+
+    # Take screenshots of both
+    screenshot1 = await browser.take_screenshot(url1, full_page=True)
+    screenshot2 = await browser.take_screenshot(url2, full_page=True)
+
+    # Compare images
+    result = compare_images(screenshot1, screenshot2, threshold=threshold, output_diff=True)
+
+    # Clean up screenshots
+    with contextlib.suppress(OSError):
+        screenshot1.unlink()
+        screenshot2.unlink()
+
+    # Format output
+    output = "## 🔍 Visual Diff Comparison\n\n"
+    output += f"**Before**: {url1}\n"
+    output += f"**After**: {url2}\n\n"
+
+    if result.has_differences:
+        output += "⚠️ **Differences detected!**\n\n"
+        output += f"- **Similarity**: {result.overall_similarity:.1f}%\n"
+        output += f"- **Diff Percentage**: {result.diff_percentage:.2f}%\n"
+        output += f"- **Diff Regions**: {len(result.diff_regions)}\n\n"
+
+        for i, region in enumerate(result.diff_regions, 1):
+            output += f"**Region {i}**: "
+            output += f"({region.x}, {region.y}) {region.width}x{region.height} "
+            output += f"({region.difference_score:.1f}% different)\n"
+
+        if result.diff_image_path:
+            output += f"\n📸 Diff image saved: `{result.diff_image_path}`"
+    else:
+        output += "✅ **No visual differences detected!**\n"
+        output += f"Similarity: {result.overall_similarity:.1f}%"
+
+    return output
+
+
+@mcp.tool()
+async def analyze_fps(
+    video_path: str,
+    target_fps: float = 60.0,
+    jank_threshold_ms: float = 5.0,
+) -> str:
+    """Analyze a video recording for FPS consistency and jank.
+
+    Detects frame drops, stutter, and animation jank by analyzing
+    frame timing consistency.
+
+    Args:
+        video_path: Path to the video file
+        target_fps: Expected FPS (default 60)
+        jank_threshold_ms: Frame time deviation threshold for jank (default 5ms)
+    """
+    path = Path(video_path)
+    if not path.exists():
+        return f"❌ Video not found: {video_path}"
+
+    result = await analyze_video_fps(path, target_fps, jank_threshold_ms)
+    report = generate_fps_report(result)
+
+    return f"## 🎯 FPS Analysis\n\n{report}"
+
+
+@mcp.tool()
+async def get_performance_metrics(
+    url: str,
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Get Core Web Vitals and performance metrics for a page.
+
+    Measures LCP, FCP, CLS, TTFB, and other performance metrics.
+
+    Args:
+        url: URL to analyze
+    """
+    if ctx is None:
+        raise RuntimeError("Context is required")
+
+    app_ctx = ctx.request_context.lifespan_context
+    browser = app_ctx.browser
+
+    # Get browser page for metrics extraction using pooled context
+    async with browser.pooled_context() as (_, page):
+        await page.goto(url, wait_until="networkidle")
+
+        metrics = await extract_performance_metrics(page, url)
+        report = generate_metrics_report(metrics)
+
+    result_id = str(uuid.uuid4())[:8]
+    app_ctx.analyses[result_id] = report
+
+    return f"**Analysis ID**: `{result_id}`\n\n{report}"
+
+
+@mcp.tool()
+async def analyze_with_consensus_tool(
+    url: str,
+    focus: str = "all",
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Analyze a page using multiple AI models for higher accuracy.
+
+    Runs analysis with both Gemini and Ollama (if available), then
+    merges results to identify issues both models agree on.
+
+    Args:
+        url: URL to analyze
+        focus: Focus area for analysis
+    """
+    if ctx is None:
+        raise RuntimeError("Context is required")
+
+    app_ctx = ctx.request_context.lifespan_context
+    browser = app_ctx.browser
+
+    # Take screenshot for analysis
+    screenshot_path = await browser.take_screenshot(url, full_page=True)
+
+    prompt = animation_diagnosis(focus)
+
+    # Run consensus analysis
+    result = await run_consensus_analysis(screenshot_path, prompt)
+
+    with contextlib.suppress(OSError):
+        screenshot_path.unlink()
+
+    # Format output
+    output = "## 🤝 Multi-Model Consensus Analysis\n\n"
+    output += f"**URL**: {url}\n"
+    output += f"**Consensus Score**: {result.consensus_score:.0f}%\n\n"
+
+    if result.agreed_findings:
+        output += "### ✅ Agreed Issues (High Confidence)\n\n"
+        for finding in result.agreed_findings:
+            output += f"- **{finding.severity.value}** [{finding.category.value}]: "
+            output += f"{finding.description}\n"
+            if finding.suggestion:
+                output += f"  - 💡 {finding.suggestion}\n"
+
+    if result.gemini_only:
+        output += "\n### 🔵 Gemini-Only Findings\n\n"
+        for finding in result.gemini_only:
+            output += f"- **{finding.severity.value}**: {finding.description}\n"
+
+    if result.ollama_only:
+        output += "\n### 🟢 Ollama-Only Findings\n\n"
+        for finding in result.ollama_only:
+            output += f"- **{finding.severity.value}**: {finding.description}\n"
+
+    if not result.merged_findings:
+        output += "No issues found by either model. ✨"
+
+    result_id = str(uuid.uuid4())[:8]
+    app_ctx.analyses[result_id] = output
+
+    return output
 
 
 # =============================================================================
