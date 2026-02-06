@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/rishitank/animawatch/compare/v0.2.0...v0.3.0) (2026-02-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* Renamed package from visual-diagnosis-mcp to animawatch
+
+### 🚀 Features
+
+* Add production-ready improvements, new examples, and fix Release Please ([#5](https://github.com/rishitank/animawatch/issues/5)) ([cdfda30](https://github.com/rishitank/animawatch/commit/cdfda30c7084a2f267ff08275fddb5e17af2cf4f))
+* initial implementation of visual diagnosis MCP server ([857759c](https://github.com/rishitank/animawatch/commit/857759cfbcb39d799248ad65acd1aea66834b1d2))
+* Migrate to google-genai SDK, fix vulnerability, and add examples ([#4](https://github.com/rishitank/animawatch/issues/4)) ([7aeeb8b](https://github.com/rishitank/animawatch/commit/7aeeb8b1dc250c2185d6f67a3ed17c17b183903e))
+* rename to AnimaWatch and upgrade to FastMCP with latest MCP spec ([ec94aa6](https://github.com/rishitank/animawatch/commit/ec94aa6aac7840e9ab67a2d23ff5f9587a57ccaf))
+
+
+### 🐛 Bug Fixes
+
+* resolve lint and type errors ([#2](https://github.com/rishitank/animawatch/issues/2)) ([7c0fc19](https://github.com/rishitank/animawatch/commit/7c0fc19d2fc8bf938147c93dd6bdcbd7acbef9d6))
+* Use PAT for Release Please to allow PR creation ([#6](https://github.com/rishitank/animawatch/issues/6)) ([5ba64a0](https://github.com/rishitank/animawatch/commit/5ba64a0bf837f89d492f6d3a5313ebcc09514e9b))
+
+
+### 📚 Documentation
+
+* update BRANCH_PROTECTION.md to reflect ruleset configuration ([93442fa](https://github.com/rishitank/animawatch/commit/93442fa7da6d9b7ccc4cdc9c3942e0712df0f171))
+
+
+### 🧪 Tests
+
+* add comprehensive tests for browser, vision, and server modules ([#3](https://github.com/rishitank/animawatch/issues/3)) ([f4ccff9](https://github.com/rishitank/animawatch/commit/f4ccff994939572082f16b1f0b1f127c98c73b71))
+
+
+### 🔧 CI/CD
+
+* add GitHub workflows, CodeRabbit, dependabot, and release-please configuration ([a34a05c](https://github.com/rishitank/animawatch/commit/a34a05c1240d3a92e966883d85e568dbabfe78cc))
+* **deps:** bump astral-sh/setup-uv from 5 to 7 ([#1](https://github.com/rishitank/animawatch/issues/1)) ([e6291b8](https://github.com/rishitank/animawatch/commit/e6291b87f794a3b4020df7bd8a7359677c409af8))
+
 ## [0.2.0] - 2026-02-01
 
 ### 🚀 Features
@@ -31,4 +67,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Animation diagnosis tools for detecting jank, stuttering, visual artifacts
 - Screenshot analysis for non-animated issues
 - Configurable via environment variables
-
