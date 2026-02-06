@@ -142,6 +142,7 @@ uv run python examples/ci_integration.py \
 - Counts issues by severity
 
 **GitHub Actions Example:**
+
 ```yaml
 - name: Visual QA Check
   env:
