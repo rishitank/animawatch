@@ -74,7 +74,7 @@ def compare_images(
     diff_sum = 0
 
     # Get pixel data as a flat list for grayscale image
-    pixel_data = list(diff_gray.getdata())
+    pixel_data = diff_gray.tobytes()
     for pixel_value in pixel_data:
         # For grayscale ("L" mode), pixels are single int values
         pixel_diff = int(pixel_value)
@@ -129,7 +129,7 @@ def _find_diff_regions(
 
     # Calculate region difference score
     region = diff_gray.crop(bbox)
-    pixels = list(region.getdata())
+    pixels = region.tobytes()
     avg_diff = sum(pixels) / len(pixels) if pixels else 0
     difference_score = (avg_diff / 255) * 100
 

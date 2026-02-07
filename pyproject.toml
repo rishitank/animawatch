@@ -8,14 +8,37 @@ requires-python = ">=3.11"
 authors = [
     { name = "Rishi Tank", email = "3771081+rishitank@users.noreply.github.com" }
 ]
-keywords = ["mcp", "animation", "visual-testing", "playwright", "gemini", "ai-vision", "ui-testing", "fastmcp"]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "animation",
+    "visual-testing",
+    "playwright",
+    "gemini",
+    "ai-vision",
+    "ui-testing",
+    "fastmcp",
+    "web-vitals",
+    "performance",
+    "accessibility",
+    "browser-automation",
+    "claude",
+    "llm",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 
 dependencies = [
