@@ -303,3 +303,169 @@ class TestTools:
         assert "Accessibility Analysis" in result
         cast(AsyncMock, mock_app_context.browser.take_screenshot).assert_called_once()
         cast(AsyncMock, mock_app_context.vision.analyze_image).assert_called_once()
+
+
+class TestNewTools:
+    """Tests for new MCP tools (devices, diff, fps, metrics, consensus)."""
+
+    @pytest.mark.asyncio
+    async def test_list_devices_all(self) -> None:
+        """Test list_devices returns all devices."""
+        from animawatch.server import list_devices
+
+        result = await list_devices()
+
+        assert "Available Device Profiles" in result
+        assert "iphone" in result.lower() or "pixel" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_list_devices_by_category(self) -> None:
+        """Test list_devices filters by category."""
+        from animawatch.server import list_devices
+
+        result = await list_devices(category="mobile")
+
+        assert "Available Device Profiles" in result
+        assert "Category" in result
+        assert "mobile" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_list_devices_invalid_category(self) -> None:
+        """Test list_devices with invalid category."""
+        from animawatch.server import list_devices
+
+        result = await list_devices(category="invalid")
+
+        assert "Invalid category" in result
+
+    @pytest.fixture
+    def mock_app_context(self) -> AppContext:
+        """Create a mock AppContext for testing."""
+        mock_browser = MagicMock()
+        mock_browser.record_interaction = AsyncMock(return_value=Path("/tmp/video.webm"))
+        mock_browser.take_screenshot = AsyncMock(return_value=Path("/tmp/screenshot.png"))
+        mock_browser.pooled_context = MagicMock()
+
+        # Mock pooled_context as async context manager
+        mock_context = MagicMock()
+        mock_page = MagicMock()
+        mock_page.goto = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value={})
+
+        async def mock_pooled_context_cm(*args, **kwargs):
+            class AsyncCM:
+                async def __aenter__(self):
+                    return (mock_context, mock_page)
+
+                async def __aexit__(self, *args):
+                    pass
+
+            return AsyncCM()
+
+        def pooled_ctx(*args, **kwargs):
+            return mock_pooled_context_cm(*args, **kwargs).__aenter__()
+
+        mock_browser.pooled_context = pooled_ctx
+
+        mock_vision = AsyncMock()
+        mock_vision.analyze_video = AsyncMock(return_value="Video analysis result")
+        mock_vision.analyze_image = AsyncMock(return_value="Image analysis result")
+
+        return AppContext(
+            browser=mock_browser,
+            vision=mock_vision,
+            recordings={},
+            analyses={},
+        )
+
+    @pytest.fixture
+    def mock_ctx(self, mock_app_context: AppContext) -> MagicMock:
+        """Create a mock Context for testing tools."""
+        mock_ctx = MagicMock()
+        mock_ctx.request_context.lifespan_context = mock_app_context
+        return mock_ctx
+
+    @pytest.mark.asyncio
+    async def test_watch_with_device_valid(
+        self, mock_ctx: MagicMock, mock_app_context: AppContext
+    ) -> None:
+        """Test watch_with_device with valid device."""
+        from animawatch.server import watch_with_device
+
+        with patch("animawatch.server.uuid.uuid4") as mock_uuid:
+            mock_uuid.return_value = MagicMock()
+            mock_uuid.return_value.__str__ = lambda self: "abc12345-6789"
+
+            result = await watch_with_device(
+                url="https://example.com",
+                device="iphone_15_pro",
+                ctx=mock_ctx,
+            )
+
+            assert "Device Animation Analysis" in result
+            assert "iPhone 15 Pro" in result
+
+    @pytest.mark.asyncio
+    async def test_watch_with_device_invalid(
+        self, mock_ctx: MagicMock, mock_app_context: AppContext
+    ) -> None:
+        """Test watch_with_device with invalid device."""
+        from animawatch.server import watch_with_device
+
+        result = await watch_with_device(
+            url="https://example.com",
+            device="invalid_device",
+            ctx=mock_ctx,
+        )
+
+        assert "not found" in result
+        assert "Available devices" in result
+
+    @pytest.mark.asyncio
+    async def test_watch_with_device_without_context(self) -> None:
+        """Test watch_with_device raises without context."""
+        from animawatch.server import watch_with_device
+
+        with pytest.raises(RuntimeError, match="Context is required"):
+            await watch_with_device(
+                url="https://example.com",
+                device="iphone_15_pro",
+                ctx=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_analyze_fps_file_not_found(self) -> None:
+        """Test analyze_fps with non-existent file."""
+        from animawatch.server import analyze_fps
+
+        result = await analyze_fps(video_path="/nonexistent/video.mp4")
+
+        assert "Video not found" in result
+
+    @pytest.mark.asyncio
+    async def test_get_performance_metrics_without_context(self) -> None:
+        """Test get_performance_metrics raises without context."""
+        from animawatch.server import get_performance_metrics
+
+        with pytest.raises(RuntimeError, match="Context is required"):
+            await get_performance_metrics(url="https://example.com", ctx=None)
+
+    @pytest.mark.asyncio
+    async def test_analyze_with_consensus_without_context(self) -> None:
+        """Test analyze_with_consensus_tool raises without context."""
+        from animawatch.server import analyze_with_consensus_tool
+
+        with pytest.raises(RuntimeError, match="Context is required"):
+            await analyze_with_consensus_tool(url="https://example.com", ctx=None)
+
+    @pytest.mark.asyncio
+    async def test_compare_screenshots_without_context(self) -> None:
+        """Test compare_screenshots raises without context."""
+        from animawatch.server import compare_screenshots
+
+        with pytest.raises(RuntimeError, match="Context is required"):
+            await compare_screenshots(
+                url1="https://example.com",
+                url2="https://example.org",
+                ctx=None,
+            )
