@@ -19,8 +19,11 @@ jobs:
     steps:
       - name: Enable auto-merge (squash)
         # Using PAT instead of GITHUB_TOKEN so that the merge triggers the 'closed' event
-        # for other workflows (GITHUB_TOKEN actions don't trigger subsequent workflows)
+        # for other workflows (GITHUB_TOKEN actions don't trigger subsequent workflows).
+        # Runs triggered by Dependabot cannot read repository secrets (PAT_AUTO_MERGE is
+        # empty there), so they fall back to GITHUB_TOKEN, which the permissions above
+        # grant contents:write + pull-requests:write for `gh pr merge --auto`.
         run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}
         env:
-          GH_TOKEN: ${{ secrets.PAT_AUTO_MERGE }}
+          GH_TOKEN: ${{ github.actor == 'dependabot[bot]' && secrets.GITHUB_TOKEN || secrets.PAT_AUTO_MERGE }}
 

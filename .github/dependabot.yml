@@ -19,15 +19,17 @@ updates:
     labels:
       - 'dependencies'
       - 'automated'
+    # pyproject.toml uses unpinned '>=' ranges, so Dependabot opens "update requirement"
+    # PRs that carry no update-type; groups filtered by update-types never match them and
+    # every bump used to arrive as its own PR. Group by pattern only.
     groups:
       dev-dependencies:
         patterns:
           - 'pytest*'
           - 'ruff'
           - 'mypy'
-        update-types:
-          - 'minor'
-          - 'patch'
+          - 'pip-audit'
+          - 'types-*'
       production-dependencies:
         patterns:
           - '*'
@@ -35,9 +37,12 @@ updates:
           - 'pytest*'
           - 'ruff'
           - 'mypy'
-        update-types:
-          - 'minor'
-          - 'patch'
+          - 'pip-audit'
+          - 'types-*'
+      security-updates:
+        applies-to: 'security-updates'
+        patterns:
+          - '*'
 
   # GitHub Actions
   - package-ecosystem: 'github-actions'
@@ -54,4 +59,8 @@ updates:
       - 'dependencies'
       - 'ci'
       - 'automated'
+    groups:
+      github-actions:
+        patterns:
+          - '*'
 
