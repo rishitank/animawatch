@@ -1,0 +1,35 @@
+name: zz-tmp-uv-lock
+
+on:
+  push:
+    branches: [fix/security-alerts]
+
+permissions:
+  contents: write
+
+jobs:
+  relock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/security-alerts
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.8.17"
+
+      - name: Regenerate uv.lock for the security upgrades
+        run: |
+          uv lock --upgrade-package anyio --upgrade-package pillow --upgrade-package cryptography --upgrade-package pyasn1 --upgrade-package pyjwt --upgrade-package mcp --upgrade-package starlette --upgrade-package python-multipart --upgrade-package urllib3 --upgrade-package msgpack --upgrade-package pip --upgrade-package pydantic-settings --upgrade-package idna --upgrade-package python-dotenv --upgrade-package pytest --upgrade-package requests --upgrade-package pygments --upgrade-package click
+          git diff --stat -- uv.lock
+
+      - name: Commit uv.lock only
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git diff --cached --quiet && { echo "uv.lock unchanged"; exit 0; }
+          git commit -m "fix(security): regenerate uv.lock with patched dependency versions"
+          git push origin HEAD:fix/security-alerts
