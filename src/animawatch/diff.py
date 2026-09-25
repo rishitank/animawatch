@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops
 
 
 @dataclass
@@ -152,22 +152,16 @@ def _generate_diff_image(
     highlight_color: tuple[int, int, int, int],
 ) -> Path:
     """Generate a diff image with highlighted changes."""
-    # Create a copy of the "after" image
-    result = after.copy()
+    # Mask of differing pixels: 255 where the difference exceeds the threshold.
+    # Image.point runs in C, unlike a per-pixel getpixel loop in Python.
+    mask = diff_gray.point(lambda p: 255 if p > threshold else 0)
 
-    # Create an overlay for highlighting
-    overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    # Transparent overlay with the highlight colour painted only under the mask
+    overlay = Image.new("RGBA", after.size, (0, 0, 0, 0))
+    overlay.paste(highlight_color, (0, 0, *after.size), mask)
 
-    # Highlight differing pixels using getpixel for type safety
-    for x in range(diff_gray.width):
-        for y in range(diff_gray.height):
-            pixel_value = diff_gray.getpixel((x, y))
-            if isinstance(pixel_value, int) and pixel_value > threshold:
-                draw.point((x, y), fill=highlight_color)
-
-    # Composite the overlay onto the result
-    result = Image.alpha_composite(result.convert("RGBA"), overlay)
+    # Composite the overlay onto the "after" image
+    result = Image.alpha_composite(after.convert("RGBA"), overlay)
 
     # Save to temp file
     fd, tmp_path = tempfile.mkstemp(suffix="_diff.png")

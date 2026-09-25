@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 from animawatch.diff import (
     DiffRegion,
@@ -112,6 +112,46 @@ class TestCompareImages:
         assert result.diff_image_path is not None
         assert result.diff_image_path.exists()
         result.diff_image_path.unlink(missing_ok=True)
+
+    @pytest.mark.parametrize(
+        "highlight_color", [(0, 0, 255, 255), (255, 0, 0, 128)], ids=["opaque", "translucent"]
+    )
+    def test_diff_image_highlights_exactly_pixels_above_threshold(
+        self, tmp_path: Path, highlight_color: tuple[int, int, int, int]
+    ) -> None:
+        """The diff image is the "after" image with only above-threshold pixels overlaid."""
+        threshold = 5
+        before = Image.new("RGB", (50, 50), "white")
+        after = before.copy()
+        after.paste((255, 0, 0), (10, 10, 20, 20))  # strong difference
+        after.paste((250, 250, 250), (30, 30, 40, 40))  # grey diff of exactly `threshold`
+        before_path, after_path = tmp_path / "before.png", tmp_path / "after.png"
+        before.save(before_path)
+        after.save(after_path)
+
+        result = compare_images(
+            before_path, after_path, threshold=threshold, highlight_color=highlight_color
+        )
+        assert result.diff_image_path is not None
+        try:
+            actual = Image.open(result.diff_image_path).convert("RGBA")
+
+            # Reference: overlay the highlight pixel by pixel wherever the grayscale
+            # difference is strictly greater than the threshold.
+            diff_gray = ImageChops.difference(before, after).convert("L")
+            overlay = Image.new("RGBA", after.size, (0, 0, 0, 0))
+            for x in range(after.width):
+                for y in range(after.height):
+                    value = diff_gray.getpixel((x, y))
+                    if isinstance(value, int) and value > threshold:
+                        overlay.putpixel((x, y), highlight_color)
+            expected = Image.alpha_composite(after.convert("RGBA"), overlay)
+
+            assert actual.tobytes() == expected.tobytes()
+            assert actual.getpixel((35, 35)) == (250, 250, 250, 255)  # at threshold: untouched
+            assert actual.getpixel((0, 0)) == (255, 255, 255, 255)  # unchanged: untouched
+        finally:
+            result.diff_image_path.unlink(missing_ok=True)
 
     def test_result_paths(self, identical_images: tuple[Path, Path]) -> None:
         """Test that result contains correct paths."""
