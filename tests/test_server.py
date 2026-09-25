@@ -560,17 +560,20 @@ class TestNewTools:
             url1="https://example.com", url2="https://example.org", ctx=mock_ctx
         )
 
-        assert "Differences detected!" in result
-        assert "**Diff Percentage**: 25.00%" in result  # 400 of 1600 pixels
-        assert "**Region 1**: (10, 10) 20x20" in result
-        assert not before.exists()
-        assert not after.exists()
-
-        diff_image = Path(result.rsplit("Diff image saved: `", 1)[1].rstrip("`"))
+        # Locate the generated diff image first so it is removed even if an assertion fails.
+        marker = "Diff image saved: `"
+        diff_image = Path(result.rsplit(marker, 1)[1].rstrip("`")) if marker in result else None
         try:
+            assert "Differences detected!" in result
+            assert "**Diff Percentage**: 25.00%" in result  # 400 of 1600 pixels
+            assert "**Region 1**: (10, 10) 20x20" in result
+            assert not before.exists()
+            assert not after.exists()
+            assert diff_image is not None
             assert diff_image.exists()
         finally:
-            diff_image.unlink(missing_ok=True)
+            if diff_image is not None:
+                diff_image.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_compare_screenshots_identical(
