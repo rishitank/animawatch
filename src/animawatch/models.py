@@ -5,7 +5,6 @@ All findings include confidence scores (0-100) for hallucination prevention.
 """
 
 from enum import Enum
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -137,7 +136,3 @@ class AnalysisResult(BaseModel):
                 lines.append("")
 
         return "\n".join(lines)
-
-
-# JSON schema for prompting vision models to return structured output
-STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = AnalysisResult.model_json_schema()

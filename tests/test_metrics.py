@@ -1,5 +1,7 @@
 """Tests for performance metrics in animawatch.metrics."""
 
+from urllib.parse import urlparse
+
 from animawatch.metrics import (
     CoreWebVitals,
     MetricsThresholds,
@@ -146,7 +148,13 @@ class TestGenerateMetricsReport:
         )
         report = generate_metrics_report(metrics)
         assert "Performance Metrics Report" in report
-        assert "https://test.com" in report
+        # Parse the reported URL rather than substring-matching it, so the test
+        # asserts the exact scheme and host instead of "somewhere in the text".
+        url_lines = [line for line in report.splitlines() if line.startswith("URL: ")]
+        assert len(url_lines) == 1
+        reported = urlparse(url_lines[0].removeprefix("URL: "))
+        assert reported.scheme == "https"
+        assert reported.hostname == "test.com"
         assert "LCP" in report
         assert "good" in report
 
