@@ -306,8 +306,12 @@ class TestNewTools:
         result = await list_devices(category="mobile")
 
         assert "Available Device Profiles" in result
-        assert "Category" in result
-        assert "mobile" in result.lower()
+        assert "**Category**: mobile" in result
+        # Mobile profiles are listed; tablet and desktop profiles are filtered out.
+        assert "**iphone_15_pro**" in result
+        assert "**pixel_8**" in result
+        assert "**ipad_pro_12**" not in result
+        assert "**desktop_1080p**" not in result
 
     @pytest.mark.asyncio
     async def test_list_devices_invalid_category(self) -> None:
@@ -337,6 +341,11 @@ class TestNewTools:
 
             assert "Device Animation Analysis" in result
             assert "iPhone 15 Pro" in result
+            # The selected device is forwarded to the recorder.
+            record = cast(AsyncMock, mock_app_context.browser.record_interaction)
+            record.assert_called_once()
+            assert record.call_args.kwargs["device"] == "iphone_15_pro"
+            assert record.call_args.kwargs["url"] == "https://example.com"
 
     @pytest.mark.asyncio
     async def test_watch_with_device_invalid(
