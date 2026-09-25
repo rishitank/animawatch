@@ -35,6 +35,7 @@ def mock_app_context(mock_page: MagicMock, tmp_path: Path) -> AppContext:
 
     @asynccontextmanager
     async def pooled_context(*_args: Any, **_kwargs: Any) -> AsyncIterator[tuple[Any, Any]]:
+        """Yield a ``(context, page)`` pair like ``BrowserRecorder.pooled_context``."""
         yield (MagicMock(), mock_page)
 
     mock_browser.pooled_context = MagicMock(side_effect=pooled_context)
