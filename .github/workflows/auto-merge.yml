@@ -15,9 +15,15 @@ jobs:
     # Don't run on draft PRs, forked PRs or dependency-bot PRs. Renovate decides
     # per update whether to automerge (see renovate.json and the shared preset), and
     # enabling auto-merge here would override that policy, e.g. for major bumps.
+    # PRs opened by a human account (including agent PRs) are skipped too: the
+    # owner merges those. The review-gate ruleset counts a CodeRabbit approval as
+    # the required review, so arming them here would merge them the moment
+    # CodeRabbit approved. Other bot PRs (e.g. the release PR) still need the
+    # owner's approval, because CodeRabbit skips bot PRs.
     if: |
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type == 'Bot' &&
       github.event.pull_request.user.login != 'renovate[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
