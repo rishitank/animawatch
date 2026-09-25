@@ -6,7 +6,7 @@ Built with **FastMCP** leveraging the latest MCP spec (2025-11-25) features.
 
 ## ✨ What It Does
 
-```
+```text
 YOU: "Watch the modal animation on this page"
      ↓
 ANIMAWATCH:
@@ -90,6 +90,7 @@ cp .env.example .env
 ### 4. Add to Your MCP Client
 
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
 ```json
 {
   "mcpServers": {
@@ -105,6 +106,7 @@ cp .env.example .env
 ```
 
 **Augment Code** (settings):
+
 ```json
 {
   "mcpServers": {
@@ -122,57 +124,68 @@ cp .env.example .env
 ## 📖 Usage Examples
 
 ### Watch Animation Issues
-```
+
+```text
 "Watch the modal animation on https://example.com for any jank"
 ```
 
 ### Perform Actions Then Watch
-```
+
+```text
 "Click the hamburger menu on https://example.com and watch the slide-in animation"
 ```
 
 ### Focus on Specific Area
-```
+
+```text
 "Watch https://example.com with focus on scroll behavior"
 ```
 
 ### Accessibility Check
-```
+
+```text
 "Check accessibility on https://example.com"
 ```
 
 ### Access Previous Results
-```
+
+```text
 "Show me the analysis from animawatch://analyses/abc123"
 ```
 
 ### Test on Mobile Device
-```
+
+```text
 "Watch https://example.com on an iPhone 15 Pro and check for animation issues"
 ```
 
 ### Compare Before/After
-```
+
+```text
 "Compare screenshots of https://staging.example.com and https://example.com for visual differences"
 ```
 
 ### Check Performance Metrics
-```
+
+```text
 "Get Core Web Vitals for https://example.com"
 ```
 
 ### Analyze FPS
-```
+
+```text
 "Analyze the FPS of this video recording for frame drops"
 ```
 
 ### Multi-Model Consensus
-```
+
+```text
 "Analyze https://example.com using both Gemini and Ollama for higher accuracy"
 ```
 
 ### List Available Devices
-```
+
+```text
 "What mobile devices can I test with?"
 ```
 
@@ -216,16 +229,16 @@ export OLLAMA_MODEL=qwen2.5-vl:7b
 
 ## 🏗️ Architecture
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                            AnimaWatch                                     │
-│                         (FastMCP Server)                                  │
+│                            AnimaWatch                                    │
+│                         (FastMCP Server)                                 │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  Lifespan Context (AppContext)                                            │
-│  ├── BrowserRecorder (Playwright)                                         │
-│  ├── VisionProvider (Gemini/Ollama)                                       │
-│  ├── recordings: dict[id, Path]                                           │
-│  └── analyses: dict[id, str]                                              │
+│  Lifespan Context (AppContext)                                           │
+│  ├── BrowserRecorder (Playwright)                                        │
+│  ├── VisionProvider (Gemini/Ollama)                                      │
+│  ├── recordings: dict[id, Path]                                          │
+│  └── analyses: dict[id, str]                                             │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Core Tools          │  Device & Performance   │  Comparison & Accuracy  │
 │  ──────────────────  │  ────────────────────   │  ────────────────────   │
@@ -235,11 +248,11 @@ export OLLAMA_MODEL=qwen2.5-vl:7b
 │  analyze_video       │  get_performance_metrics│                         │
 │  check_accessibility │                         │                         │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  Resources                    │  Prompts                                  │
-│  ───────────────────────────  │  ───────────────────────────────────────  │
-│  animawatch://recordings/{id} │  animation_diagnosis                      │
-│  animawatch://analyses/{id}   │  page_analysis                            │
-│  animawatch://config          │  accessibility_check                      │
+│  Resources                    │  Prompts                                 │
+│  ───────────────────────────  │  ─────────────────────────────────────── │
+│  animawatch://recordings/{id} │  animation_diagnosis                     │
+│  animawatch://analyses/{id}   │  page_analysis                           │
+│  animawatch://config          │  accessibility_check                     │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
