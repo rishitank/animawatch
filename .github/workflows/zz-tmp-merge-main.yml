@@ -1,0 +1,68 @@
+name: zz-tmp-merge-main
+
+# TEMPORARY. Merges main into this PR branch because the merge conflicts and
+# cannot be done with the "Update branch" API. It resolves ONLY the expected
+# conflict (renovate.json) by keeping this branch's side, fails on anything else,
+# verifies the result, and pushes the merge commit. Deleted right after it runs.
+
+on:
+  push:
+    branches: [chore/renovate]
+
+permissions:
+  contents: write
+
+jobs:
+  merge-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: chore/renovate
+          fetch-depth: 0
+
+      - name: Merge origin/main
+        env:
+          EXPECTED: renovate.json
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
+          echo "branch head: $(git rev-parse HEAD)  main: $(git rev-parse origin/main)"
+          if git merge --no-ff --no-edit origin/main; then
+            echo "::error::expected a conflict in $EXPECTED but the merge was clean; use the Update branch API instead"
+            exit 1
+          fi
+          conflicted="$(git diff --name-only --diff-filter=U)"
+          echo "conflicted files: $conflicted"
+          if [ "$conflicted" != "$EXPECTED" ]; then
+            echo "::error::unexpected conflict set: $conflicted"
+            exit 1
+          fi
+          git checkout --ours -- "$EXPECTED"
+          git add -- "$EXPECTED"
+          git commit -m "Merge branch 'main' into chore/renovate" -m "renovate.json was added on main by the Renovate onboarding PR (#34, extends config:recommended). This branch's version is kept: it extends the shared preset github>rishitank/.github:python, which itself extends config:recommended, so nothing from the onboarding file is lost."
+
+      - name: Verify the merge
+        env:
+          EXPECTED: renovate.json
+        run: |
+          set -euo pipefail
+          # Two parents: this branch and main.
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3
+          git merge-base --is-ancestor origin/main HEAD
+          # The resolved file is byte-identical to this branch's version.
+          git diff --exit-code HEAD^1 HEAD -- "$EXPECTED"
+          # No conflict markers anywhere in tracked text files.
+          if git grep -n -I -E '^(<<<<<<<|>>>>>>>) ' -- .; then
+            echo '::error::conflict markers found'
+            exit 1
+          fi
+          python3 -m json.tool renovate.json >/dev/null
+          grep -q 'github>rishitank/.github:python' renovate.json
+          echo 'Files changed by the merge relative to this branch:'
+          git diff --stat HEAD^1 HEAD
+
+      - name: Push
+        run: git push origin HEAD:chore/renovate
