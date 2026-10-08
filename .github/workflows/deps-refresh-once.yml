@@ -1,0 +1,63 @@
+# ONE-SHOT, TEMPORARY. Runs a dependency-update command on a GitHub runner and
+# commits the resulting lockfile change back to this branch, so a lockfile
+# never has to be hand-transcribed. Delete this file in the very next commit
+# (that commit, pushed by a person/agent rather than GITHUB_TOKEN, is what
+# triggers CI on the refreshed lockfile).
+name: deps-refresh-once
+
+on:
+  push:
+    branches: [ci/hygiene]
+    paths: [.github/workflows/deps-refresh-once.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        if: contains(fromJSON('["node","pnpm","bun"]'), 'python')
+        with:
+          node-version: current
+      - uses: pnpm/action-setup@v6.0.10
+        if: "'python' == 'pnpm'"
+        with:
+          package_json_file: ./package.json
+      - uses: oven-sh/setup-bun@v2.2.0
+        if: "'python' == 'bun'"
+      - uses: actions/setup-python@v7.0.0
+        if: "'python' == 'python'"
+        with:
+          python-version: "3.12"
+      - name: Update
+        run: |
+          set -euxo pipefail
+          pip install uv
+          # Only the packages with advisories. A blanket --upgrade also moves ruff
+          # 0.14 -> 0.16, whose new UP042 rule and Markdown formatting fail ci.yml.
+          uv lock -P anyio -P cryptography -P idna -P mcp -P msgpack -P pip -P pyasn1 -P pydantic-settings -P pygments -P pyjwt -P python-dotenv -P python-multipart -P requests -P starlette -P urllib3
+      - name: Verify the lockfile installs
+        run: |
+          set -euxo pipefail
+          uv lock --check
+          uv sync --locked --all-extras --dev --no-install-project
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- .
+          git reset -q -- node_modules .github/workflows/deps-refresh-once.yml || true
+          if git diff --cached --quiet; then echo "Nothing changed."; exit 0; fi
+          git --no-pager diff --cached --stat
+          git commit -m "chore(deps): refresh lockfile to pick up patched versions" -m "Ran on a runner by the one-shot deps-refresh-once workflow: pip install uv && uv lock -P anyio -P cryptography -P idna -P mcp -P msgpack -P pip -P pyasn1 -P pydantic-settings -P pygments -P pyjwt -P python-dotenv -P python-multipart -P requests -P starlette -P urllib3"
+          git push
