@@ -37,7 +37,7 @@ jobs:
       # Auto-merge the Release PR so every merge to main triggers a release
       - name: Auto-merge Release PR
         if: ${{ steps.release.outputs.prs_created == 'true' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PRS_JSON: ${{ steps.release.outputs.prs }}
         with:
