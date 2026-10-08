@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.9.0,<2",  # the server uses mcp.server.fastmcp, which mcp 2.x removed
+    "mcp>=2.3,<3",  # the server uses mcp.server.fastmcp, which mcp 2.x removed
     "playwright>=1.40.0",
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
