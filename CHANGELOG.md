@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2](https://github.com/rishitank/animawatch/compare/v0.3.1...v0.3.2) (2026-10-09)
+
+
+### 🔧 CI/CD
+
+* add shared security scan and actionlint ([#48](https://github.com/rishitank/animawatch/issues/48)) ([11d5ef1](https://github.com/rishitank/animawatch/commit/11d5ef110ad227279d2c241e45eb050a01edec89))
+
 ## [0.3.1](https://github.com/rishitank/animawatch/compare/v0.3.0...v0.3.1) (2026-02-06)
 
 
