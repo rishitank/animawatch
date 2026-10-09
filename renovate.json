@@ -1,6 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
+  "extends": ["github>rishitank/.github:python"],
+  "packageRules": [
+    {
+      "description": "Hold mcp below 2. The server is built on mcp.server.fastmcp, which mcp 2.x removed (FastMCP became MCPServer, with other API changes), so #50 failed at import. pyproject.toml caps it at <2 for the same reason. Lift once src/animawatch/server.py is migrated: https://py.sdk.modelcontextprotocol.io/v2/migration/",
+      "matchPackageNames": ["mcp"],
+      "allowedVersions": "<2"
+    }
   ]
 }
