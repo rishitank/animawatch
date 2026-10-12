@@ -51,7 +51,7 @@ requires-dist = [
     { name = "aiofiles", specifier = ">=25.1.0" },
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "mcp", specifier = ">=1.9.0,<2" },
+    { name = "mcp", specifier = ">=1.30.0,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "ollama", marker = "extra == 'ollama'", specifier = ">=0.3.0" },
     { name = "pillow", specifier = ">=10.0.0" },
