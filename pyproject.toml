@@ -4,7 +4,7 @@ version = "0.3.1"
 description = "MCP server that watches web animations like a human tester - detects jank, stuttering, visual artifacts using AI vision"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.11"
+requires-python = ">=3.15.2"
 authors = [
     { name = "Rishi Tank", email = "3771081+rishitank@users.noreply.github.com" }
 ]
@@ -20,28 +20,28 @@ classifiers = [
 
 dependencies = [
     "mcp>=1.30.0,<2",  # the server uses mcp.server.fastmcp, which mcp 2.x removed
-    "playwright>=1.40.0",
+    "playwright>=1.64.1",
     "httpx>=0.28.1",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    "python-dotenv>=1.0.0",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.2",
+    "python-dotenv>=1.2.4",
     "aiofiles>=25.1.0",
     "Pillow>=10.0.0",
-    "google-genai>=1.0.0",
+    "google-genai>=1.75.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.0.0",
-    "ruff>=0.4.0",
-    "mypy>=1.10.0",
-    "pip-audit>=2.7.0",
-    "types-aiofiles>=25.1.0.20251011",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.3",
+    "mypy>=1.20.2",
+    "pip-audit>=2.10.1",
+    "types-aiofiles>=25.1.0.20260518",
 ]
 ollama = [
-    "ollama>=0.3.0",
+    "ollama>=0.6.3",
 ]
 
 [project.scripts]
