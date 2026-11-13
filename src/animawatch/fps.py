@@ -35,86 +35,121 @@ from typing import Any, Literal
 # Scripts injected into the page
 # --------------------------------------------------------------------------
 
-#: Installed with ``BrowserContext.add_init_script`` so it exists in every
-#: document. It does nothing until ``start()`` is called: the rAF loop only runs
-#: while measuring, so the page is not kept painting outside the window.
-FRAME_COLLECTOR_JS = r"""
-(() => {
-  if (window.__animawatchFrames) { return; }
-  const MAX_FRAMES = 20000;
-  const MAX_LOAF = 500;
-  const state = {
-    running: false,
-    timestamps: [],
-    loaf: [],
-    loafSupported: false,
-    startedAt: null,
-    overflow: false,
-  };
-  const tick = (ts) => {
-    if (!state.running) { return; }
-    if (state.timestamps.length < MAX_FRAMES) { state.timestamps.push(ts); }
-    else { state.overflow = true; }
-    requestAnimationFrame(tick);
-  };
-  try {
-    const types = (window.PerformanceObserver && PerformanceObserver.supportedEntryTypes) || [];
-    if (types.includes('long-animation-frame')) {
-      state.loafSupported = true;
-      new PerformanceObserver((list) => {
-        for (const e of list.getEntries()) {
-          if (state.loaf.length >= MAX_LOAF) { state.overflow = true; continue; }
-          state.loaf.push({
-            startTime: e.startTime,
-            duration: e.duration,
-            blockingDuration: e.blockingDuration || 0,
-            scripts: (e.scripts || []).slice(0, 5).map((s) => ({
-              invoker: String(s.invoker || ''),
-              sourceURL: String(s.sourceURL || ''),
-              sourceFunctionName: String(s.sourceFunctionName || ''),
-              duration: s.duration || 0,
-            })),
-          });
-        }
-      }).observe({ type: 'long-animation-frame', buffered: true });
+#: Defines ``window.__animawatchFrames`` in a document (once). It does nothing
+#: until ``start()`` is called: the rAF loop only runs while measuring, so the
+#: page is not kept painting outside the window. ``armAfterLoad()`` starts
+#: measurement once the document has loaded and its network has been quiet for
+#: ``QUIET_MS`` (an in-page stand-in for Playwright's "networkidle"), so a
+#: page reached by a navigating action is measured without its load work.
+_COLLECTOR_BODY = r"""
+  if (!window.__animawatchFrames) {
+    const MAX_FRAMES = 20000;
+    const MAX_LOAF = 500;
+    const QUIET_MS = 500;
+    const state = {
+      running: false,
+      timestamps: [],
+      loaf: [],
+      loafSupported: false,
+      startedAt: null,
+      armedAfterNavigation: false,
+      overflow: false,
+    };
+    let observer = null;
+    const tick = (ts) => {
+      if (!state.running) { return; }
+      if (state.timestamps.length < MAX_FRAMES) { state.timestamps.push(ts); }
+      else { state.overflow = true; }
+      requestAnimationFrame(tick);
+    };
+    const record = (entries) => {
+      for (const e of entries) {
+        if (state.loaf.length >= MAX_LOAF) { state.overflow = true; continue; }
+        state.loaf.push({
+          startTime: e.startTime,
+          duration: e.duration,
+          blockingDuration: e.blockingDuration || 0,
+          scripts: (e.scripts || []).slice(0, 5).map((s) => ({
+            invoker: String(s.invoker || ''),
+            sourceURL: String(s.sourceURL || ''),
+            sourceFunctionName: String(s.sourceFunctionName || ''),
+            duration: s.duration || 0,
+          })),
+        });
+      }
+    };
+    try {
+      const types = (window.PerformanceObserver && PerformanceObserver.supportedEntryTypes) || [];
+      if (types.includes('long-animation-frame')) {
+        state.loafSupported = true;
+        observer = new PerformanceObserver((list) => record(list.getEntries()));
+        observer.observe({ type: 'long-animation-frame', buffered: true });
+      }
+    } catch (e) {
+      state.loafSupported = false;
     }
-  } catch (e) {
-    state.loafSupported = false;
+    const start = () => {
+      if (state.running) { return; }
+      state.timestamps = [];
+      state.overflow = false;
+      state.startedAt = performance.now();
+      state.running = true;
+      requestAnimationFrame(tick);
+    };
+    const lastNetworkActivity = () => {
+      let last = 0;
+      for (const r of performance.getEntriesByType('resource')) {
+        last = Math.max(last, r.responseEnd || r.startTime);
+      }
+      return last;
+    };
+    const startWhenQuiet = () => {
+      const quietFor = performance.now() - lastNetworkActivity();
+      if (quietFor >= QUIET_MS) { start(); return; }
+      setTimeout(startWhenQuiet, QUIET_MS - quietFor);
+    };
+    Object.defineProperty(window, '__animawatchFrames', {
+      configurable: false,
+      enumerable: false,
+      value: Object.freeze({
+        start,
+        armAfterLoad() {
+          state.armedAfterNavigation = true;
+          if (document.readyState === 'complete') { startWhenQuiet(); }
+          else { window.addEventListener('load', startWhenQuiet, { once: true }); }
+        },
+        stop() {
+          state.running = false;
+          // Entries the observer has not delivered yet would otherwise be lost.
+          if (observer) { record(observer.takeRecords()); }
+          const from = state.startedAt === null ? 0 : state.startedAt;
+          return {
+            timestamps: state.timestamps.slice(),
+            loaf: state.loaf.filter((e) => e.startTime + e.duration >= from),
+            loafSupported: state.loafSupported,
+            startedAt: state.startedAt,
+            stoppedAt: performance.now(),
+            timeOrigin: performance.timeOrigin,
+            armedAfterNavigation: state.armedAfterNavigation,
+            overflow: state.overflow,
+            visibility: document.visibilityState,
+          };
+        },
+      }),
+    });
   }
-  Object.defineProperty(window, '__animawatchFrames', {
-    configurable: false,
-    enumerable: false,
-    value: Object.freeze({
-      start() {
-        if (state.running) { return; }
-        state.timestamps = [];
-        state.overflow = false;
-        state.startedAt = performance.now();
-        state.running = true;
-        requestAnimationFrame(tick);
-      },
-      stop() {
-        state.running = false;
-        const from = state.startedAt === null ? 0 : state.startedAt;
-        return {
-          timestamps: state.timestamps.slice(),
-          loaf: state.loaf.filter((e) => e.startTime + e.duration >= from),
-          loafSupported: state.loafSupported,
-          startedAt: state.startedAt,
-          stoppedAt: performance.now(),
-          timeOrigin: performance.timeOrigin,
-          overflow: state.overflow,
-          visibility: document.visibilityState,
-        };
-      },
-    }),
-  });
-})();
 """
 
-#: Re-arms measurement in a document that replaced the measured one (a click
-#: that navigates). Added as a second init script once measurement starts.
-FRAME_AUTOSTART_JS = "window.__animawatchFrames && window.__animawatchFrames.start();"
+#: Installed with ``BrowserContext.add_init_script`` before the page loads.
+FRAME_COLLECTOR_JS = "(() => {" + _COLLECTOR_BODY + "})();"
+
+#: Installed once measurement has started, for documents that replace the
+#: measured one (a click that navigates). Playwright does not define the order
+#: of several init scripts, so this one also defines the collector if it runs
+#: first, and then arms it to start after the new page has loaded.
+FRAME_AUTOSTART_JS = (
+    "(() => {" + _COLLECTOR_BODY + "  window.__animawatchFrames.armAfterLoad();\n})();"
+)
 
 #: Samples ``count`` + 1 rAF timestamps on an idle page (resolves early after
 #: two seconds if the page is throttled).
@@ -377,6 +412,7 @@ def analyze_frame_timestamps(
     *,
     refresh_source: RefreshSource = "configured",
     started_at_ms: float | None = None,
+    stopped_at_ms: float | None = None,
     long_animation_frames: Sequence[LongAnimationFrame] = (),
     loaf_supported: bool = False,
     compositor: CompositorFrameStats | None = None,
@@ -388,6 +424,11 @@ def analyze_frame_timestamps(
     ``n - 1`` of those intervals produced no main-thread frame and count as
     dropped. The jank percentage is dropped / (presented + dropped): the share
     of the display's refreshes in the window that got no new frame.
+
+    ``started_at_ms`` and ``stopped_at_ms`` are the edges of the measurement
+    window. A stall between the start and the first frame, or between the last
+    frame and the stop, counts as dropped frames too; the edges themselves are
+    not presented frames.
     """
     if refresh_interval_ms <= 0:
         raise ValueError("refresh_interval_ms must be positive")
@@ -415,9 +456,33 @@ def analyze_frame_timestamps(
                 )
         previous = current
 
+    if ordered:
+        edges: list[tuple[float, float]] = []
+        if started_at_ms is not None and ordered[0] > started_at_ms:
+            edges.append((started_at_ms, ordered[0]))
+        if stopped_at_ms is not None and stopped_at_ms > ordered[-1]:
+            edges.append((ordered[-1], stopped_at_ms))
+        for begin, end in edges:
+            dropped = frame_slots(end - begin, refresh_interval_ms) - 1
+            if dropped > 0:
+                dropped_total += dropped
+                events.append(
+                    JankEvent(
+                        timestamp_ms=begin - origin,
+                        frame_delta_ms=end - begin,
+                        dropped_frames=dropped,
+                        severity=classify_severity(dropped),
+                    )
+                )
+        events.sort(key=lambda e: e.timestamp_ms)
+
     presented = len(deltas)
     expected = presented + dropped_total
-    duration = (ordered[-1] - ordered[0]) if len(ordered) > 1 else 0.0
+    first = started_at_ms if started_at_ms is not None and ordered else None
+    last = stopped_at_ms if stopped_at_ms is not None and ordered else None
+    window_start = min(first, ordered[0]) if first is not None else (ordered[0] if ordered else 0.0)
+    window_end = max(last, ordered[-1]) if last is not None else (ordered[-1] if ordered else 0.0)
+    duration = window_end - window_start if len(ordered) > 1 else 0.0
     sorted_deltas = sorted(deltas)
 
     all_notes = list(notes)
@@ -465,8 +530,10 @@ def generate_fps_report(result: FrameTimingResult, max_events: int = 10) -> str:
     lines = [
         "# Frame Timing Report",
         "",
-        "Measured inside the page (requestAnimationFrame and Long Animation Frames), "
-        "not from the video recording.",
+        (
+            "Measured inside the page (requestAnimationFrame and Long Animation Frames), "
+            "not from the video recording."
+        ),
         "",
         "## Summary",
         f"- **Verdict**: {result.verdict}",
@@ -480,6 +547,13 @@ def generate_fps_report(result: FrameTimingResult, max_events: int = 10) -> str:
         f"p99 {result.p99_frame_ms:.1f} ms, max {result.max_frame_ms:.1f} ms",
     ]
 
+    if result.compositor is None and result.dropped_frames > 0:
+        lines.append(
+            "- **Note**: these are main-thread frames. A CSS transform or opacity "
+            "animation runs on the compositor and may still look smooth; measure with "
+            "`trace_compositor=True` to see the frames users saw."
+        )
+
     if result.compositor is not None:
         c = result.compositor
         lines.extend(
@@ -490,8 +564,10 @@ def generate_fps_report(result: FrameTimingResult, max_events: int = 10) -> str:
                 f"- **Presented without the main thread's update**: {c.presented_partial} "
                 f"({c.partial_percentage:.1f}%)",
                 f"- **Dropped**: {c.dropped} ({c.dropped_percentage:.1f}%)",
-                "- A transform or opacity animation runs on the compositor and can stay "
-                "smooth while the main thread drops frames.",
+                (
+                    "- A transform or opacity animation runs on the compositor and can stay "
+                    "smooth while the main thread drops frames."
+                ),
             ]
         )
 
