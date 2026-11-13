@@ -60,11 +60,11 @@ The video is used only for the vision pass. Playwright records it at a fixed 25 
 | `compare_screenshots` | 🔍 Pixel diff between two URLs | No |
 | `list_devices` | 📱 Device profiles | No |
 | `check_accessibility` | ♿ Visual accessibility review | Yes |
-| `analyze_with_consensus_tool` | 🤝 Gemini and Ollama review the same screenshot, and the findings they agree on are reported | Yes (both) |
+| `analyze_with_consensus_tool` | 🤝 Gemini and Ollama review the same screenshot, and the findings they agree on are reported (not offered when hosted) | Yes (both) |
 | `analyze_video` | 🎥 Vision review of a local video file (not offered when hosted) | Yes |
 | `record` | ⏺️ Record without analysis, saving to a local folder (not offered when hosted) | No |
 
-Actions (`click`, `hover`, `type`, `scroll` and `wait`) are passed as a list, for example `[{"type": "click", "selector": "#menu"}]`. Only `http` and `https` URLs are opened, plus `file://` on a local install. Each wait is capped at `MAX_RECORDING_DURATION` seconds.
+Actions (`click`, `hover`, `type`, `scroll` and `wait`) are passed as a list, for example `[{"type": "click", "selector": "#menu"}]`. They are validated before any page opens: an unknown action or a missing selector is an error, not a skipped step. Only `http` and `https` URLs are opened, plus `file://` on a local install. Each wait is capped at `MAX_RECORDING_DURATION` seconds.
 
 ### Resources
 
@@ -126,7 +126,7 @@ cp .env.example .env
 }
 ```
 
-Other MCP clients take the same command and arguments. To serve over streamable HTTP instead of stdio, run `uv run animawatch --http`. It listens on `SERVER_HOST:SERVER_PORT` (default `127.0.0.1:8765`) at `/mcp`.
+Other MCP clients take the same command and arguments. To serve over streamable HTTP instead of stdio, run `uv run animawatch --http`. It listens on `SERVER_HOST:SERVER_PORT` (default `127.0.0.1:8765`) at `/mcp`. It accepts only localhost, the bind address and the names in `ALLOWED_HOSTS` in Host and Origin headers, which protects it against DNS rebinding. The HTTP transport has no authentication, so do not expose it beyond your machine without a proxy that adds it.
 
 ## 📖 Usage Examples
 
@@ -154,6 +154,7 @@ Other MCP clients take the same command and arguments. To serve over streamable 
 | `VIDEO_WIDTH` / `VIDEO_HEIGHT` | `1280` / `720` | Viewport and recording size |
 | `MAX_RECORDING_DURATION` | `30` | Upper bound in seconds on every wait |
 | `SERVER_HOST` / `SERVER_PORT` | `127.0.0.1` / `8765` | Bind address for `--http` |
+| `ALLOWED_HOSTS` | (none) | Extra host names, comma-separated, that `--http` accepts in Host and Origin headers, for example a reverse proxy's domain |
 
 The default model was checked on 13 Nov 2026. Google retired `gemini-2.0-flash`, the previous default, on 1 Jun 2026, and lists `gemini-3.8-flash` as stable with video input ([models](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash), [deprecations](https://ai.google.dev/gemini-api/docs/deprecations)).
 
@@ -182,7 +183,7 @@ export VISION_PROVIDER=ollama
 export OLLAMA_MODEL=qwen2.5-vl:7b
 ```
 
-Ollama's vision models take images, not video. For `watch`, AnimaWatch therefore takes up to 8 frames from the recording, one every 0.5 s, and reviews each one. This needs `ffmpeg` on your `PATH`. The model sees still frames, not motion. Frame timing is measured in the page either way.
+Ollama's vision models take images, not video. For `watch`, AnimaWatch therefore takes 8 frames spread across the whole recording (up to 60 s of it) and reviews each one. This needs `ffmpeg` on your `PATH`. The model sees still frames, not motion. Frame timing is measured in the page either way.
 
 ## ☁️ Apify Actor (single-tenant Standby)
 
@@ -192,7 +193,8 @@ The repository includes an Apify Actor definition. Nothing is published yet.
 - The `Dockerfile` is based on `apify/actor-python-playwright` and keeps that image's Playwright version, so the bundled browsers match.
 - `.actor/input_schema.json` holds the user's own Gemini key, as a secret field. Without a key, vision is off.
 - `.actor/pay_per_event.json` defines one event, `page-analysed`, charged once for each page a tool loads and analyses. **$0.05 is a proposed price, not a final one.**
-- It is designed to be single-tenant. Each user's server runs in that user's own Apify account, so the user pays the platform compute plus the events, and nothing is shared between users. Hosted, it refuses `file://` URLs and does not offer `analyze_video` or `record`.
+- It is designed to be single-tenant. Each user's server runs in that user's own Apify account, so the user pays the platform compute plus the events, and nothing is shared between users. Hosted, it refuses `file://` URLs, does not offer `analyze_video`, `record` or `analyze_with_consensus_tool` (there is no Ollama), and writes no diff images. With vision turned off, any key in the input is dropped.
+- Known limitation: the hosted browser will open any `http(s)` address, including private or loopback ones. Single-tenancy limits that to the caller's own run. A multi-tenant mode would first need request interception that blocks private addresses on every request, redirects included.
 
 Run it locally with `uv pip install 'apify>=4.0.0,<5'`, then `uv run animawatch-actor`. Set `ACTOR_TEST_PAY_PER_EVENT=true` to log charges to a local dataset.
 
