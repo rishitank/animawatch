@@ -13,6 +13,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import mimetypes
 import time
 import uuid
@@ -27,7 +28,7 @@ from google.genai import types
 
 from .cache import AnalysisCache, analysis_cache
 from .config import settings
-from .frames import cleanup_frames, extract_frames
+from .frames import cleanup_frames, extract_frames, video_duration_ms
 from .logging import log_extra, timed_operation
 from .models import AnalysisMetadata, AnalysisResult, Finding, IssueCategory, Severity
 from .retry import RetryConfig, vision_circuit, with_retry
@@ -37,11 +38,23 @@ T = TypeVar("T")
 # Maximum time to wait for video processing (5 minutes)
 MAX_PROCESSING_SECONDS = 300
 
-# Frames sampled from a video for Ollama, which takes images only: candidates
-# every 250 ms (up to 60 s of video), then at most 8 spread over the whole of it
+# Frames sampled from a video for Ollama, which takes images only: up to 240
+# candidates spread over the whole video (every 250 ms, or wider for videos
+# over 60 s), then at most 8 of them spread from the first to the last
 OLLAMA_VIDEO_SCAN_INTERVAL_MS = 250
 OLLAMA_VIDEO_SCAN_MAX_FRAMES = 240
 OLLAMA_VIDEO_MAX_FRAMES = 8
+
+
+def scan_interval_ms(duration_ms: int | None) -> int:
+    """Candidate-frame spacing so that the scan covers the whole video.
+
+    With an unknown duration (no ffprobe), the scan covers the first
+    ``OLLAMA_VIDEO_SCAN_INTERVAL_MS * OLLAMA_VIDEO_SCAN_MAX_FRAMES`` ms.
+    """
+    if not duration_ms:
+        return OLLAMA_VIDEO_SCAN_INTERVAL_MS
+    return max(OLLAMA_VIDEO_SCAN_INTERVAL_MS, math.ceil(duration_ms / OLLAMA_VIDEO_SCAN_MAX_FRAMES))
 
 
 def spread(items: list[T], count: int) -> list[T]:
@@ -535,15 +548,16 @@ class OllamaProvider(VisionProvider):
     ) -> str | AnalysisResult:
         """Analyze a video by sampling frames across all of it and analysing each one.
 
-        Ollama's vision models take images, not video. Candidate frames are taken
-        with ffmpeg every ``OLLAMA_VIDEO_SCAN_INTERVAL_MS`` (identical ones
-        skipped), then ``OLLAMA_VIDEO_MAX_FRAMES`` of them, spread from the first
-        to the last, are analysed one after another. Motion between frames is not
+        Ollama's vision models take images, not video. Up to
+        ``OLLAMA_VIDEO_SCAN_MAX_FRAMES`` candidate frames are taken with ffmpeg,
+        spaced to cover the video's whole duration (identical ones skipped).
+        Then ``OLLAMA_VIDEO_MAX_FRAMES`` of them, spread from the first to the
+        last, are analysed one after another. Motion between frames is not
         visible to the model.
         """
         extraction = await extract_frames(
             video_path,
-            interval_ms=OLLAMA_VIDEO_SCAN_INTERVAL_MS,
+            interval_ms=scan_interval_ms(await video_duration_ms(video_path)),
             max_frames=OLLAMA_VIDEO_SCAN_MAX_FRAMES,
         )
         try:

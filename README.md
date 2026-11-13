@@ -183,7 +183,7 @@ export VISION_PROVIDER=ollama
 export OLLAMA_MODEL=qwen2.5-vl:7b
 ```
 
-Ollama's vision models take images, not video. For `watch`, AnimaWatch therefore takes 8 frames spread across the whole recording (up to 60 s of it) and reviews each one. This needs `ffmpeg` on your `PATH`. The model sees still frames, not motion. Frame timing is measured in the page either way.
+Ollama's vision models take images, not video. For `watch` and `analyze_video`, AnimaWatch therefore takes 8 frames spread across the whole recording and reviews each one. This needs `ffmpeg` and `ffprobe` on your `PATH`. The model sees still frames, not motion. Frame timing is measured in the page either way.
 
 ## ☁️ Apify Actor (single-tenant Standby)
 
