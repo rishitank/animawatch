@@ -655,12 +655,23 @@ def _build_timing(
                 "The compositor trace was left out because it spans the navigation and "
                 "the new page's load, so it does not match the window measured above."
             )
-    frames_overflow = bool(raw.get("framesOverflow"))
+    frames_overflow = bool(raw.get("framesOverflow")) and bool(timestamps)
+    loaf_entries: list[dict[str, Any]] = list(raw.get("loaf", []))
     if frames_overflow:
         notes.append(
             f"The frame buffer filled ({FRAME_BUFFER_LIMIT} frames), so the window ends at "
             "the last recorded frame; the rest of the wait was not measured."
         )
+        # Everything reported must cover the same window as the frame timing.
+        window_end = max(timestamps)
+        loaf_entries = [e for e in loaf_entries if float(e.get("startTime", 0.0)) <= window_end]
+        if compositor is not None:
+            # The trace ran until stop(), past the last recorded frame.
+            compositor = None
+            notes.append(
+                "The compositor trace was left out because it runs past the last "
+                "recorded frame, so it does not match the window measured above."
+            )
     if raw.get("loafOverflow"):
         notes.append(
             f"Only the first {LOAF_BUFFER_LIMIT} long animation frames were kept; there were more."
@@ -691,7 +702,7 @@ def _build_timing(
         started_at_ms=float(started_at) if started_at is not None else None,
         stopped_at_ms=float(stopped_at) if stopped_at is not None else None,
         long_animation_frames=parse_long_animation_frames(
-            raw.get("loaf", []), float(started_at) if started_at is not None else 0.0
+            loaf_entries, float(started_at) if started_at is not None else 0.0
         ),
         loaf_supported=bool(raw.get("loafSupported", False)),
         compositor=compositor,
