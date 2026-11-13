@@ -27,12 +27,17 @@ from google.genai import types
 
 from .cache import AnalysisCache, analysis_cache
 from .config import settings
+from .frames import cleanup_frames, extract_frames
 from .logging import log_extra, timed_operation
 from .models import AnalysisMetadata, AnalysisResult, Finding, IssueCategory, Severity
 from .retry import RetryConfig, vision_circuit, with_retry
 
 # Maximum time to wait for video processing (5 minutes)
 MAX_PROCESSING_SECONDS = 300
+
+# Frames sampled from a video for Ollama, which takes images only
+OLLAMA_VIDEO_FRAME_INTERVAL_MS = 500
+OLLAMA_VIDEO_MAX_FRAMES = 8
 
 # Retry configuration for vision API calls
 VISION_RETRY_CONFIG = RetryConfig(
@@ -244,7 +249,10 @@ class VisionProvider(ABC):
 
 
 class GeminiProvider(VisionProvider):
-    """Google Gemini vision provider (FREE tier available).
+    """Google Gemini vision provider, using your own API key.
+
+    Google's free tier may not be used to serve users in the UK, EEA or
+    Switzerland (Gemini API terms, "Use Restrictions"); use a paid key there.
 
     Features:
     - Video and image analysis with Gemini's multimodal models
@@ -259,7 +267,8 @@ class GeminiProvider(VisionProvider):
         super().__init__()
         if not settings.gemini_api_key:
             raise ValueError(
-                "GEMINI_API_KEY not set. Get a free key at https://aistudio.google.com/"
+                "GEMINI_API_KEY is not set. Create a key at https://aistudio.google.com/ "
+                "(in the UK, EEA or Switzerland it must be on a paid, billing-enabled project)."
             )
         self.client: genai.Client = genai.Client(api_key=settings.gemini_api_key)
         self.model_name: str = settings.vision_model
@@ -476,10 +485,11 @@ class GeminiProvider(VisionProvider):
 
 
 class OllamaProvider(VisionProvider):
-    """Ollama local vision provider (100% FREE, runs locally).
+    """Ollama local vision provider (runs on your machine; no API key).
 
     Features:
     - Image analysis with local vision models
+    - Video analysis by sampling frames (needs ffmpeg on PATH)
     - No external API calls - fully private
     - Response caching for identical requests
     - Structured JSON output with confidence scoring
@@ -508,13 +518,56 @@ class OllamaProvider(VisionProvider):
     async def analyze_video(
         self, video_path: Path, prompt: str, structured: bool = False
     ) -> str | AnalysisResult:
-        """Analyze video by extracting key frames (Ollama doesn't support video directly)."""
-        # For Ollama, we'll extract frames and analyze them
-        # This is a simplified implementation - could be enhanced with ffmpeg
-        raise NotImplementedError(
-            "Ollama doesn't support direct video analysis. "
-            "Use analyze_image with extracted frames or switch to Gemini."
+        """Analyze a video by sampling frames and analysing each one.
+
+        Ollama's vision models take images, not video, so up to
+        ``OLLAMA_VIDEO_MAX_FRAMES`` frames are taken every
+        ``OLLAMA_VIDEO_FRAME_INTERVAL_MS`` (skipping identical ones) with ffmpeg
+        and analysed one after another. Motion between frames is not visible to
+        the model.
+        """
+        extraction = await extract_frames(
+            video_path,
+            interval_ms=OLLAMA_VIDEO_FRAME_INTERVAL_MS,
+            max_frames=OLLAMA_VIDEO_MAX_FRAMES,
         )
+        try:
+            if not extraction.frames:
+                raise RuntimeError(
+                    "Could not extract frames from the video for Ollama: install ffmpeg "
+                    "and make sure it is on PATH."
+                )
+            results: list[str | AnalysisResult] = []
+            for frame in extraction.frames:
+                frame_prompt = (
+                    f"This is a still frame taken {frame.timestamp_ms / 1000:.1f}s into a "
+                    f"screen recording.\n\n{prompt}"
+                )
+                results.append(await self.analyze_image(frame.path, frame_prompt, structured))
+        finally:
+            await cleanup_frames(extraction)
+
+        if structured:
+            parsed = [r for r in results if isinstance(r, AnalysisResult)]
+            findings = [f for r in parsed for f in r.findings]
+            return AnalysisResult(
+                id=str(uuid.uuid4())[:8],
+                success=True,
+                findings=findings,
+                summary=" ".join(r.summary for r in parsed),
+                overall_score=min((r.overall_score for r in parsed), default=100),
+                metadata=AnalysisMetadata(
+                    provider="ollama",
+                    model=self.model,
+                    analysis_duration_ms=sum(r.metadata.analysis_duration_ms for r in parsed),
+                ),
+            )
+        sections = [
+            f"### Frame at {frame.timestamp_ms / 1000:.1f}s\n\n"
+            + (r if isinstance(r, str) else r.to_markdown())
+            for frame, r in zip(extraction.frames, results, strict=True)
+        ]
+        return "\n\n".join(sections)
 
     @with_retry(VISION_RETRY_CONFIG)
     async def analyze_image(
@@ -578,7 +631,13 @@ class OllamaProvider(VisionProvider):
 
 
 def get_vision_provider() -> VisionProvider:
-    """Factory function to get the configured vision provider."""
+    """Factory function to get the configured vision provider.
+
+    Raises ValueError when vision is turned off (``VISION_PROVIDER=none``) or
+    Gemini has no API key, and ImportError when the ollama package is missing.
+    """
+    if settings.vision_provider == "none":
+        raise ValueError("Vision is turned off (VISION_PROVIDER=none).")
     if settings.vision_provider == "ollama":
         return OllamaProvider()
     return GeminiProvider()
