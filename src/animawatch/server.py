@@ -1,37 +1,84 @@
 """AnimaWatch MCP Server - Watch web animations like a human tester.
 
-Built with FastMCP leveraging the latest MCP spec (2025-11-25):
-- Lifespan management for browser/vision resources
+Built with FastMCP (the ``mcp`` Python SDK):
+- Lifespan management for browser/vision resources, shared by every session
+- Frame timing measured inside the page, not from the video
 - Resources for accessing recordings and analysis results
 - Prompts for different analysis templates
 - Image content type for screenshots
-- Sampling for server-side LLM requests
 """
 
+import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncIterator
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.server.session import ServerSession
+from mcp.server.transport_security import TransportSecuritySettings
 
-from .browser import BrowserRecorder
+from . import billing
+from .actions import Action, InvalidActionsError, parse_actions
+from .billing import PAGE_ANALYSED
+from .browser import BrowserRecorder, URLNotAllowedError, validate_url
 from .config import settings
 from .consensus import analyze_with_consensus as run_consensus_analysis
 from .devices import DEVICES, DeviceCategory, get_device
 from .diff import compare_images
-from .fps import analyze_video_fps, generate_fps_report
+from .fps import FrameTimingResult, generate_fps_report
 from .metrics import extract_performance_metrics, generate_metrics_report
 from .vision import VisionProvider, get_vision_provider
+
+V = TypeVar("V")
 
 # =============================================================================
 # Application Context (Lifespan Management)
 # =============================================================================
+
+
+#: How many analyses and saved recordings the server keeps (oldest dropped first).
+MAX_STORED_ANALYSES = 200
+MAX_STORED_RECORDINGS = 20
+
+
+class BoundedStore(OrderedDict[str, V]):
+    """A dict that keeps only its newest ``limit`` entries.
+
+    A long-running server (Apify Standby) would otherwise grow without bound.
+    ``on_evict`` runs for each dropped value (used to delete recording files).
+    """
+
+    def __init__(
+        self,
+        limit: int,
+        initial: Mapping[str, V] | None = None,
+        on_evict: Callable[[V], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.limit = limit
+        self.on_evict = on_evict
+        for key, value in (initial or {}).items():
+            self[key] = value
+
+    def __setitem__(self, key: str, value: V) -> None:
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.limit:
+            _, evicted = self.popitem(last=False)
+            if self.on_evict is not None:
+                self.on_evict(evicted)
+
+
+def _delete_file(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
 
 
 @dataclass
@@ -39,24 +86,100 @@ class AppContext:
     """Type-safe application context for dependency injection."""
 
     browser: BrowserRecorder
-    vision: VisionProvider
+    vision: VisionProvider | None
     recordings: dict[str, Path] = field(default_factory=dict)
     analyses: dict[str, str] = field(default_factory=dict)
+    vision_unavailable_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.recordings = BoundedStore(
+            MAX_STORED_RECORDINGS, self.recordings, on_evict=_delete_file
+        )
+        self.analyses = BoundedStore(MAX_STORED_ANALYSES, self.analyses)
+
+
+def create_vision_provider() -> tuple[VisionProvider | None, str]:
+    """The configured vision provider, or None and the reason it is off."""
+    if settings.vision_provider == "none":
+        return None, "Vision is turned off (VISION_PROVIDER=none)."
+    try:
+        return get_vision_provider(), ""
+    except (ValueError, ImportError) as err:
+        return None, f"Vision is off: {err}"
+
+
+_shared_lock = asyncio.Lock()
+_shared_context: AppContext | None = None
+_shared_users = 0
 
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Manage application lifecycle with proper resource cleanup."""
-    # Startup: Initialize browser and vision provider
-    browser = BrowserRecorder()
-    await browser.start()
-    vision = get_vision_provider()
+    """One browser and vision provider shared by every session.
+
+    Over streamable HTTP the SDK enters the lifespan once per session; sharing
+    the context means one Chromium for the whole server instead of one per
+    connected client, and resources (analyses, recordings) visible to all.
+    """
+    global _shared_context, _shared_users
+    async with _shared_lock:
+        if _shared_context is None:
+            browser = BrowserRecorder()
+            await browser.start()
+            vision, reason = create_vision_provider()
+            if vision is None:
+                from .logging import log_extra
+
+                log_extra("Vision provider unavailable", reason=reason)
+            _shared_context = AppContext(
+                browser=browser, vision=vision, vision_unavailable_reason=reason
+            )
+        _shared_users += 1
+        context = _shared_context
 
     try:
-        yield AppContext(browser=browser, vision=vision)
+        yield context
     finally:
-        # Shutdown: Clean up browser
-        await browser.stop()
+        async with _shared_lock:
+            _shared_users -= 1
+            if _shared_users == 0 and _shared_context is not None:
+                await _shared_context.browser.stop()
+                _shared_context = None
+
+
+def _require_vision(app_ctx: AppContext) -> VisionProvider:
+    """The vision provider, or a ToolError saying how to turn it on."""
+    if app_ctx.vision is None:
+        raise ToolError(
+            f"{app_ctx.vision_unavailable_reason} Set GEMINI_API_KEY to your own key "
+            "(a paid key if you or your users are in the UK, EEA or Switzerland), or "
+            "VISION_PROVIDER=ollama for a local model. Frame timing (analyze_fps) and "
+            "get_performance_metrics work without vision."
+        )
+    return app_ctx.vision
+
+
+def _check_actions(actions: Sequence[Action | Mapping[str, Any]] | None) -> list[Action]:
+    """Validate the actions before any page is opened or any work is charged."""
+    try:
+        return parse_actions(actions)
+    except InvalidActionsError as err:
+        raise ToolError(str(err)) from err
+
+
+def _check_url(url: str) -> None:
+    """Reject a URL AnimaWatch will not open, before any work is charged."""
+    try:
+        validate_url(url)
+    except URLNotAllowedError as err:
+        raise ToolError(str(err)) from err
+
+
+def _timing_section(timing: FrameTimingResult | None) -> str:
+    if timing is None:
+        return ""
+    report = generate_fps_report(timing).replace("# Frame Timing Report", "### Frame timing", 1)
+    return report.replace("\n## ", "\n#### ")
 
 
 # =============================================================================
@@ -69,12 +192,13 @@ mcp = FastMCP(
     instructions="""AnimaWatch is an MCP server that watches web animations like a human tester.
 
 It can:
-- Record browser interactions and analyze them for animation issues
+- Measure dropped frames and long animation frames inside the page
+- Record browser interactions and analyze them with AI vision for visual issues
 - Detect jank, stuttering, visual artifacts, timing problems
 - Take screenshots and analyze static pages
 - Emulate mobile/tablet devices for responsive testing
 - Compare screenshots to detect visual regressions
-- Analyze FPS and frame timing for performance issues
+- Measure frame timing against the display's refresh rate
 - Measure Core Web Vitals (LCP, FCP, CLS, TTFB)
 - Use multi-model consensus for higher accuracy
 - Store recordings and analysis results as accessible resources
@@ -87,7 +211,7 @@ It can:
 **Device & Performance Tools:**
 - `list_devices` - List available device profiles
 - `watch_with_device` - Test on mobile/tablet viewports
-- `analyze_fps` - FPS consistency and jank detection
+- `analyze_fps` - Dropped frames and long animation frames (no AI needed)
 - `get_performance_metrics` - Core Web Vitals
 
 **Comparison & Accuracy Tools:**
@@ -102,10 +226,14 @@ It can:
 
 ANIMATION_PROMPT = """You are an expert UI/UX tester analyzing a video recording of a web page.
 
+The recording is captured at a fixed, low frame rate (about 25 fps), so it cannot
+show whether the page reached 60 fps; frame drops are measured separately inside
+the page. Judge what the recording can show.
+
 Watch this recording carefully and identify ANY visual issues:
 
 ## Animation Issues
-- Jank or stuttering (frames dropping, not smooth 60fps)
+- Visible stutter: elements jumping position or freezing mid-animation
 - Incorrect timing (too fast, too slow, abrupt starts/stops)
 - Missing easing (linear when should be ease-in-out)
 - Interrupted or incomplete animations
@@ -204,10 +332,11 @@ def get_analysis(analysis_id: str, ctx: Context[ServerSession, AppContext]) -> s
 
 @mcp.resource("animawatch://config")
 def get_config() -> str:
-    """Get current AnimaWatch configuration."""
+    """Get current AnimaWatch configuration (never the API key)."""
+    model = settings.ollama_model if settings.vision_provider == "ollama" else settings.vision_model
     return f"""AnimaWatch Configuration:
 - Vision Provider: {settings.vision_provider}
-- Vision Model: {settings.vision_model}
+- Vision Model: {model}
 - Browser Headless: {settings.browser_headless}
 - Video Size: {settings.video_width}x{settings.video_height}
 - Max Recording Duration: {settings.max_recording_duration}s"""
@@ -221,7 +350,7 @@ def get_config() -> str:
 @mcp.tool()
 async def watch(
     url: str,
-    actions: list[dict[str, Any]] | None = None,
+    actions: list[Action] | None = None,
     wait_time: float = 3.0,
     focus: str = "all",
     save_recording: bool = False,
@@ -229,8 +358,10 @@ async def watch(
 ) -> str:
     """Watch a web page and analyze animations for issues.
 
-    Records browser interaction and uses AI vision to detect jank, stuttering,
-    visual artifacts, timing problems - just like a human tester would.
+    Measures dropped frames inside the page while recording the interaction,
+    then uses AI vision on the recording to find visual artifacts, stutter and
+    timing problems - just like a human tester would. Without a vision
+    provider it returns the frame timing alone.
 
     Args:
         url: URL of the page to watch
@@ -242,43 +373,66 @@ async def watch(
     if ctx is None:
         raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
-    browser = app_ctx.browser
+    _check_url(url)
+    actions = _check_actions(actions)
+    async with billing.metered(PAGE_ANALYSED):
+        output, result_id = await _watch_page(
+            app_ctx, url, actions, wait_time, focus, save_recording, device=None
+        )
+
+    header = f"## 🎬 Animation Analysis for {url}\n\n"
+    header += f"**Analysis ID**: `{result_id}` (access via `animawatch://analyses/{result_id}`)\n\n"
+    if save_recording and result_id in app_ctx.recordings:
+        header += f"**Recording ID**: `{result_id}` (access via `animawatch://recordings/{result_id}`)\n\n"
+    return header + output
+
+
+async def _watch_page(
+    app_ctx: AppContext,
+    url: str,
+    actions: list[Action] | None,
+    wait_time: float,
+    focus: str,
+    save_recording: bool,
+    device: str | None,
+) -> tuple[str, str]:
+    """Measure, record and (if vision is on) analyse one page. Returns (body, id)."""
     vision = app_ctx.vision
-
-    # Record the interaction
-    video_path = await browser.record_interaction(
-        url=url,
-        actions=actions,
-        wait_time=wait_time,
+    result = await app_ctx.browser.measure_interaction(
+        url,
+        actions,
+        wait_time,
+        device=device,
+        record_video=vision is not None or save_recording,
     )
-
-    # Generate analysis prompt
-    prompt = animation_diagnosis(focus)
-
-    # Analyze with vision AI (non-structured for backward compatibility)
-    analysis_result = await vision.analyze_video(video_path, prompt, structured=False)
-    # Handle both string and AnalysisResult return types
-    analysis = (
-        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
-    )
-
-    # Store results if requested
+    video_path = result.video_path
     result_id = str(uuid.uuid4())[:8]
-    if save_recording:
-        app_ctx.recordings[result_id] = video_path
-    else:
-        with contextlib.suppress(OSError):
-            video_path.unlink()
+    keep_video = False
 
-    app_ctx.analyses[result_id] = analysis
+    try:
+        if vision is not None and video_path is not None:
+            analysis_result = await vision.analyze_video(
+                video_path, animation_diagnosis(focus), structured=False
+            )
+            analysis = (
+                analysis_result
+                if isinstance(analysis_result, str)
+                else analysis_result.to_markdown()
+            )
+        else:
+            analysis = f"_{app_ctx.vision_unavailable_reason} Frame timing only._"
+        if video_path is not None and save_recording:
+            app_ctx.recordings[result_id] = video_path
+            keep_video = True
+    finally:
+        # A recording that is not kept is deleted, also when the vision pass fails.
+        if video_path is not None and not keep_video:
+            with contextlib.suppress(OSError):
+                video_path.unlink()
 
-    output = f"## 🎬 Animation Analysis for {url}\n\n"
-    output += f"**Analysis ID**: `{result_id}` (access via `animawatch://analyses/{result_id}`)\n\n"
-    if save_recording:
-        output += f"**Recording ID**: `{result_id}` (access via `animawatch://recordings/{result_id}`)\n\n"
-    output += analysis
-
-    return output
+    body = _timing_section(result.timing) + "\n\n### Vision analysis\n\n" + analysis
+    app_ctx.analyses[result_id] = body
+    return body, result_id
 
 
 @mcp.tool()
@@ -302,27 +456,31 @@ async def screenshot(
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
     vision = app_ctx.vision
+    _check_url(url)
+    async with billing.metered(PAGE_ANALYSED):
+        screenshot_path = await browser.take_screenshot(url, full_page)
+        try:
+            if vision is not None:
+                prompt = page_analysis(focus)
+                analysis_result = await vision.analyze_image(
+                    screenshot_path, prompt, structured=False
+                )
+                analysis = (
+                    analysis_result
+                    if isinstance(analysis_result, str)
+                    else analysis_result.to_markdown()
+                )
+            else:
+                analysis = app_ctx.vision_unavailable_reason
 
-    screenshot_path = await browser.take_screenshot(url, full_page)
+            result_id = str(uuid.uuid4())[:8]
+            app_ctx.analyses[result_id] = f"Screenshot analysis of {url}:\n\n{analysis}"
 
-    # Analyze with vision AI
-    prompt = page_analysis(focus)
-    analysis_result = await vision.analyze_image(screenshot_path, prompt, structured=False)
-    analysis = (
-        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
-    )
-
-    # Store analysis
-    result_id = str(uuid.uuid4())[:8]
-    app_ctx.analyses[result_id] = f"Screenshot analysis of {url}:\n\n{analysis}"
-
-    # Read image data for return
-    with open(screenshot_path, "rb") as f:
-        image_data = f.read()
-
-    with contextlib.suppress(OSError):
-        screenshot_path.unlink()
-
+            with open(screenshot_path, "rb") as f:
+                image_data = f.read()
+        finally:
+            with contextlib.suppress(OSError):
+                screenshot_path.unlink()
     return Image(data=image_data, format="png")
 
 
@@ -341,7 +499,7 @@ async def analyze_video(
     if ctx is None:
         raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
-    vision = app_ctx.vision
+    vision = _require_vision(app_ctx)
 
     path = Path(video_path)
     if not path.exists():
@@ -362,7 +520,7 @@ async def analyze_video(
 @mcp.tool()
 async def record(
     url: str,
-    actions: list[dict[str, Any]] | None = None,
+    actions: list[Action] | None = None,
     wait_time: float = 3.0,
     output_dir: str | None = None,
     ctx: Context[ServerSession, AppContext] | None = None,
@@ -381,6 +539,8 @@ async def record(
         raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
+    _check_url(url)
+    actions = _check_actions(actions)
 
     video_dir = Path(output_dir) if output_dir else None
     video_path = await browser.record_interaction(
@@ -418,21 +578,24 @@ async def check_accessibility(
         raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
-    vision = app_ctx.vision
+    vision = _require_vision(app_ctx)
+    _check_url(url)
+    async with billing.metered(PAGE_ANALYSED):
+        screenshot_path = await browser.take_screenshot(url, full_page=True)
+        try:
+            prompt = accessibility_check()
+            analysis_result = await vision.analyze_image(screenshot_path, prompt, structured=False)
+            analysis = (
+                analysis_result
+                if isinstance(analysis_result, str)
+                else analysis_result.to_markdown()
+            )
+        finally:
+            with contextlib.suppress(OSError):
+                screenshot_path.unlink()
 
-    screenshot_path = await browser.take_screenshot(url, full_page=True)
-
-    prompt = accessibility_check()
-    analysis_result = await vision.analyze_image(screenshot_path, prompt, structured=False)
-    analysis = (
-        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
-    )
-
-    with contextlib.suppress(OSError):
-        screenshot_path.unlink()
-
-    result_id = str(uuid.uuid4())[:8]
-    app_ctx.analyses[result_id] = analysis
+        result_id = str(uuid.uuid4())[:8]
+        app_ctx.analyses[result_id] = analysis
 
     return f"## ♿ Accessibility Analysis for {url}\n\n**Analysis ID**: `{result_id}`\n\n{analysis}"
 
@@ -476,7 +639,7 @@ async def list_devices(category: str | None = None) -> str:
 async def watch_with_device(
     url: str,
     device: str,
-    actions: list[dict[str, Any]] | None = None,
+    actions: list[Action] | None = None,
     wait_time: float = 3.0,
     focus: str = "all",
     ctx: Context[ServerSession, AppContext] | None = None,
@@ -502,34 +665,18 @@ async def watch_with_device(
         return f"❌ Device '{device}' not found.\n\nAvailable devices: {available}"
 
     app_ctx = ctx.request_context.lifespan_context
-    browser = app_ctx.browser
-    vision = app_ctx.vision
-
-    # Record with device emulation (browser handles the profile)
-    video_path = await browser.record_interaction(
-        url=url,
-        actions=actions,
-        wait_time=wait_time,
-        device=device,
-    )
-
-    prompt = animation_diagnosis(focus)
-    analysis_result = await vision.analyze_video(video_path, prompt, structured=False)
-    analysis = (
-        analysis_result if isinstance(analysis_result, str) else analysis_result.to_markdown()
-    )
-
-    result_id = str(uuid.uuid4())[:8]
-    app_ctx.analyses[result_id] = analysis
-
-    with contextlib.suppress(OSError):
-        video_path.unlink()
+    _check_url(url)
+    actions = _check_actions(actions)
+    async with billing.metered(PAGE_ANALYSED):
+        body, result_id = await _watch_page(
+            app_ctx, url, actions, wait_time, focus, save_recording=False, device=device
+        )
 
     output = "## 📱 Device Animation Analysis\n\n"
     output += f"**Device**: {profile.name} ({profile.width}x{profile.height})\n"
     output += f"**URL**: {url}\n"
     output += f"**Analysis ID**: `{result_id}`\n\n"
-    output += analysis
+    output += body
 
     return output
 
@@ -556,18 +703,27 @@ async def compare_screenshots(
 
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
+    _check_url(url1)
+    _check_url(url2)
+    async with billing.metered(PAGE_ANALYSED, 2):
+        # Take screenshots of both
+        screenshot1 = await browser.take_screenshot(url1, full_page=True)
+        try:
+            screenshot2 = await browser.take_screenshot(url2, full_page=True)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                screenshot1.unlink()
+            raise
 
-    # Take screenshots of both
-    screenshot1 = await browser.take_screenshot(url1, full_page=True)
-    screenshot2 = await browser.take_screenshot(url2, full_page=True)
-
-    # Compare images
-    result = compare_images(screenshot1, screenshot2, threshold=threshold, output_diff=True)
-
-    # Clean up screenshots
-    with contextlib.suppress(OSError):
-        screenshot1.unlink()
-        screenshot2.unlink()
+        try:
+            # Hosted, a diff image would only pile up in a container the client cannot read.
+            result = compare_images(
+                screenshot1, screenshot2, threshold=threshold, output_diff=not settings.hosted
+            )
+        finally:
+            for shot in (screenshot1, screenshot2):
+                with contextlib.suppress(OSError):
+                    shot.unlink()
 
     # Format output
     output = "## 🔍 Visual Diff Comparison\n\n"
@@ -596,28 +752,57 @@ async def compare_screenshots(
 
 @mcp.tool()
 async def analyze_fps(
-    video_path: str,
-    target_fps: float = 60.0,
-    jank_threshold_ms: float = 5.0,
+    url: str,
+    actions: list[Action] | None = None,
+    duration: float = 3.0,
+    device: str | None = None,
+    refresh_rate_hz: float | None = None,
+    trace_compositor: bool = False,
+    ctx: Context[ServerSession, AppContext] | None = None,
 ) -> str:
-    """Analyze a video recording for FPS consistency and jank.
+    """Measure dropped frames and long animation frames inside a page.
 
-    Detects frame drops, stutter, and animation jank by analyzing
-    frame timing consistency.
+    Opens the page, waits for the network to go idle, then measures for
+    ``duration`` seconds (after any actions) using requestAnimationFrame
+    timestamps and the Long Animation Frames API. Frames are judged against the
+    display's refresh interval, measured in the same browser. No video and no AI
+    model are involved.
 
     Args:
-        video_path: Path to the video file
-        target_fps: Expected FPS (default 60)
-        jank_threshold_ms: Frame time deviation threshold for jank (default 5ms)
+        url: URL of the page to measure
+        actions: Optional actions to perform once the page has loaded
+        duration: Seconds to measure after the actions (default 3)
+        device: Optional device profile name (see list_devices)
+        refresh_rate_hz: Judge against this refresh rate instead of measuring it
+        trace_compositor: Also report Chromium's compositor frame states (CDP trace)
     """
-    path = Path(video_path)
-    if not path.exists():
-        return f"❌ Video not found: {video_path}"
+    if ctx is None:
+        raise RuntimeError("Context is required")
+    if device is not None and get_device(device) is None:
+        available = ", ".join(DEVICES.keys())
+        return f"❌ Device '{device}' not found.\n\nAvailable devices: {available}"
+    if refresh_rate_hz is not None and not 10.0 <= refresh_rate_hz <= 500.0:
+        raise ToolError("refresh_rate_hz must be between 10 and 500")
+    app_ctx = ctx.request_context.lifespan_context
+    _check_url(url)
+    actions = _check_actions(actions)
+    async with billing.metered(PAGE_ANALYSED):
+        result = await app_ctx.browser.measure_interaction(
+            url,
+            actions,
+            duration,
+            device=device,
+            trace_compositor=trace_compositor,
+            refresh_rate_hz=refresh_rate_hz,
+        )
+        if result.timing is None:  # pragma: no cover - measure_frames is on
+            raise ToolError("Frame timing was not measured")
+        report = generate_fps_report(result.timing)
 
-    result = await analyze_video_fps(path, target_fps, jank_threshold_ms)
-    report = generate_fps_report(result)
+        result_id = str(uuid.uuid4())[:8]
+        app_ctx.analyses[result_id] = report
 
-    return f"## 🎯 FPS Analysis\n\n{report}"
+    return f"## 🎯 Frame Timing for {url}\n\n**Analysis ID**: `{result_id}`\n\n{report}"
 
 
 @mcp.tool()
@@ -637,16 +822,17 @@ async def get_performance_metrics(
 
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
+    _check_url(url)
+    async with billing.metered(PAGE_ANALYSED):
+        # Get browser page for metrics extraction using pooled context
+        async with browser.pooled_context() as (_, page):
+            await page.goto(url, wait_until="networkidle")
 
-    # Get browser page for metrics extraction using pooled context
-    async with browser.pooled_context() as (_, page):
-        await page.goto(url, wait_until="networkidle")
+            metrics = await extract_performance_metrics(page, url)
+            report = generate_metrics_report(metrics)
 
-        metrics = await extract_performance_metrics(page, url)
-        report = generate_metrics_report(metrics)
-
-    result_id = str(uuid.uuid4())[:8]
-    app_ctx.analyses[result_id] = report
+        result_id = str(uuid.uuid4())[:8]
+        app_ctx.analyses[result_id] = report
 
     return f"**Analysis ID**: `{result_id}`\n\n{report}"
 
@@ -671,46 +857,74 @@ async def analyze_with_consensus_tool(
 
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
+    if settings.vision_provider == "none":
+        # Consensus builds its providers directly; without this check a stored
+        # key would send the screenshot to Gemini despite vision being off.
+        raise ToolError(
+            "Vision is turned off, so no screenshot is sent to any model. "
+            "Consensus needs GEMINI_API_KEY and a running Ollama."
+        )
+    _check_url(url)
+    async with billing.metered(PAGE_ANALYSED):
+        # Take screenshot for analysis
+        screenshot_path = await browser.take_screenshot(url, full_page=True)
 
-    # Take screenshot for analysis
-    screenshot_path = await browser.take_screenshot(url, full_page=True)
+        prompt = page_analysis(focus) if focus != "all" else page_analysis()
 
-    prompt = animation_diagnosis(focus)
+        try:
+            result = await run_consensus_analysis(screenshot_path, prompt)
+        finally:
+            with contextlib.suppress(OSError):
+                screenshot_path.unlink()
 
-    # Run consensus analysis
-    result = await run_consensus_analysis(screenshot_path, prompt)
+        if result.gemini_result is None and result.ollama_result is None:
+            raise ToolError(
+                "Neither Gemini nor Ollama returned an analysis. Consensus needs both: set "
+                "GEMINI_API_KEY and run Ollama (OLLAMA_HOST, OLLAMA_MODEL)."
+            )
 
-    with contextlib.suppress(OSError):
-        screenshot_path.unlink()
+        both = result.gemini_result is not None and result.ollama_result is not None
 
-    # Format output
-    output = "## 🤝 Multi-Model Consensus Analysis\n\n"
-    output += f"**URL**: {url}\n"
-    output += f"**Consensus Score**: {result.consensus_score:.0f}%\n\n"
+        # Format output
+        output = "## 🤝 Multi-Model Consensus Analysis\n\n"
+        output += f"**URL**: {url}\n"
+        if both:
+            output += f"**Consensus Score**: {result.consensus_score:.0f}%\n\n"
+        else:
+            missing = "Gemini" if result.gemini_result is None else "Ollama"
+            present = "Ollama" if missing == "Gemini" else "Gemini"
+            output += (
+                f"**{missing} did not return an analysis**, so there is no agreement to "
+                f"report. These are {present}'s findings alone.\n\n"
+            )
 
-    if result.agreed_findings:
-        output += "### ✅ Agreed Issues (High Confidence)\n\n"
-        for finding in result.agreed_findings:
-            output += f"- **{finding.severity.value}** [{finding.category.value}]: "
-            output += f"{finding.description}\n"
-            if finding.suggestion:
-                output += f"  - 💡 {finding.suggestion}\n"
+        if result.agreed_findings:
+            output += "### ✅ Agreed Issues (High Confidence)\n\n"
+            for finding in result.agreed_findings:
+                output += f"- **{finding.severity.value}** [{finding.category.value}]: "
+                output += f"{finding.description}\n"
+                if finding.suggestion:
+                    output += f"  - 💡 {finding.suggestion}\n"
 
-    if result.gemini_only:
-        output += "\n### 🔵 Gemini-Only Findings\n\n"
-        for finding in result.gemini_only:
-            output += f"- **{finding.severity.value}**: {finding.description}\n"
+        if result.gemini_only:
+            output += "\n### 🔵 Gemini-Only Findings\n\n"
+            for finding in result.gemini_only:
+                output += f"- **{finding.severity.value}**: {finding.description}\n"
 
-    if result.ollama_only:
-        output += "\n### 🟢 Ollama-Only Findings\n\n"
-        for finding in result.ollama_only:
-            output += f"- **{finding.severity.value}**: {finding.description}\n"
+        if result.ollama_only:
+            output += "\n### 🟢 Ollama-Only Findings\n\n"
+            for finding in result.ollama_only:
+                output += f"- **{finding.severity.value}**: {finding.description}\n"
 
-    if not result.merged_findings:
-        output += "No issues found by either model. ✨"
+        if not result.merged_findings:
+            output += (
+                "No issues found by either model. ✨"
+                if both
+                else f"{'Ollama' if result.gemini_result is None else 'Gemini'} found no issues."
+            )
 
-    result_id = str(uuid.uuid4())[:8]
-    app_ctx.analyses[result_id] = output
+        result_id = str(uuid.uuid4())[:8]
+        app_ctx.analyses[result_id] = output
 
     return output
 
@@ -718,6 +932,48 @@ async def analyze_with_consensus_tool(
 # =============================================================================
 # Server Entry Point
 # =============================================================================
+
+
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+WILDCARD_BINDS = ("0.0.0.0", "::", "")
+
+
+def http_security(host: str, extra_hosts: Sequence[str]) -> TransportSecuritySettings:
+    """Host/Origin checks (DNS-rebinding protection) for the HTTP transport.
+
+    Localhost names are always allowed. A specific bind address is allowed too,
+    and so is every name in ``extra_hosts`` (``ALLOWED_HOSTS``), for example the
+    domain of a reverse proxy. Any other Host or Origin is refused.
+    """
+    names = ["127.0.0.1", "localhost", "[::1]"]
+    if host not in LOCAL_HOSTS and host not in WILDCARD_BINDS:
+        names.append(f"[{host}]" if ":" in host else host)
+    names.extend(h.strip() for h in extra_hosts if h.strip())
+    allowed_hosts = [n for name in names for n in (name, f"{name}:*")]
+    allowed_origins = [
+        f"{scheme}://{name}{port}"
+        for name in names
+        for scheme in ("http", "https")
+        for port in ("", ":*")
+    ]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
+def configure_http(host: str, port: int, extra_hosts: Sequence[str] = ()) -> None:
+    """Bind the streamable-HTTP transport to ``host``:``port``, with Host/Origin checks.
+
+    The checks stay on for every bind address: a server on 0.0.0.0 is still
+    reachable as localhost, which is what a DNS-rebinding page targets.
+    """
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.settings.transport_security = http_security(host, extra_hosts)
 
 
 def main() -> None:
@@ -728,6 +984,7 @@ def main() -> None:
     transport: Literal["stdio", "streamable-http"] = "stdio"
     if "--http" in sys.argv:
         transport = "streamable-http"
+        configure_http(settings.server_host, settings.server_port, settings.allowed_hosts_list)
 
     mcp.run(transport=transport)
 

@@ -13,13 +13,16 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import mimetypes
+import shutil
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, TypeVar
 
 import aiofiles
 from google import genai
@@ -27,12 +30,44 @@ from google.genai import types
 
 from .cache import AnalysisCache, analysis_cache
 from .config import settings
+from .frames import cleanup_frames, extract_frames, video_duration_ms
 from .logging import log_extra, timed_operation
 from .models import AnalysisMetadata, AnalysisResult, Finding, IssueCategory, Severity
 from .retry import RetryConfig, vision_circuit, with_retry
 
+T = TypeVar("T")
+
 # Maximum time to wait for video processing (5 minutes)
 MAX_PROCESSING_SECONDS = 300
+
+# Frames sampled from a video for Ollama, which takes images only: up to 240
+# candidates spread over the whole video (every 250 ms, or wider for videos
+# over 60 s), then at most 8 of them spread from the first to the last
+OLLAMA_VIDEO_SCAN_INTERVAL_MS = 250
+OLLAMA_VIDEO_SCAN_MAX_FRAMES = 240
+OLLAMA_VIDEO_MAX_FRAMES = 8
+
+
+def scan_interval_ms(duration_ms: int | None) -> int:
+    """Candidate-frame spacing so that the scan covers the whole video.
+
+    With an unknown duration (no ffprobe), the scan covers the first
+    ``OLLAMA_VIDEO_SCAN_INTERVAL_MS * OLLAMA_VIDEO_SCAN_MAX_FRAMES`` ms.
+    """
+    if not duration_ms:
+        return OLLAMA_VIDEO_SCAN_INTERVAL_MS
+    return max(OLLAMA_VIDEO_SCAN_INTERVAL_MS, math.ceil(duration_ms / OLLAMA_VIDEO_SCAN_MAX_FRAMES))
+
+
+def spread(items: list[T], count: int) -> list[T]:
+    """Up to ``count`` items evenly spaced across ``items``, first and last included."""
+    if len(items) <= count:
+        return list(items)
+    if count <= 1:
+        return items[:count]
+    step = (len(items) - 1) / (count - 1)
+    return [items[round(i * step)] for i in range(count)]
+
 
 # Retry configuration for vision API calls
 VISION_RETRY_CONFIG = RetryConfig(
@@ -244,7 +279,10 @@ class VisionProvider(ABC):
 
 
 class GeminiProvider(VisionProvider):
-    """Google Gemini vision provider (FREE tier available).
+    """Google Gemini vision provider, using your own API key.
+
+    Google's free tier may not be used to serve users in the UK, EEA or
+    Switzerland (Gemini API terms, "Use Restrictions"); use a paid key there.
 
     Features:
     - Video and image analysis with Gemini's multimodal models
@@ -259,7 +297,8 @@ class GeminiProvider(VisionProvider):
         super().__init__()
         if not settings.gemini_api_key:
             raise ValueError(
-                "GEMINI_API_KEY not set. Get a free key at https://aistudio.google.com/"
+                "GEMINI_API_KEY is not set. Create a key at https://aistudio.google.com/ "
+                "(in the UK, EEA or Switzerland it must be on a paid, billing-enabled project)."
             )
         self.client: genai.Client = genai.Client(api_key=settings.gemini_api_key)
         self.model_name: str = settings.vision_model
@@ -476,10 +515,11 @@ class GeminiProvider(VisionProvider):
 
 
 class OllamaProvider(VisionProvider):
-    """Ollama local vision provider (100% FREE, runs locally).
+    """Ollama local vision provider (runs on your machine; no API key).
 
     Features:
     - Image analysis with local vision models
+    - Video analysis by sampling frames (needs ffmpeg on PATH)
     - No external API calls - fully private
     - Response caching for identical requests
     - Structured JSON output with confidence scoring
@@ -508,13 +548,83 @@ class OllamaProvider(VisionProvider):
     async def analyze_video(
         self, video_path: Path, prompt: str, structured: bool = False
     ) -> str | AnalysisResult:
-        """Analyze video by extracting key frames (Ollama doesn't support video directly)."""
-        # For Ollama, we'll extract frames and analyze them
-        # This is a simplified implementation - could be enhanced with ffmpeg
-        raise NotImplementedError(
-            "Ollama doesn't support direct video analysis. "
-            "Use analyze_image with extracted frames or switch to Gemini."
+        """Analyze a video by sampling frames across all of it and analysing each one.
+
+        Ollama's vision models take images, not video. Up to
+        ``OLLAMA_VIDEO_SCAN_MAX_FRAMES`` candidate frames are taken with ffmpeg,
+        spaced to cover the video's whole duration (identical ones skipped).
+        Then ``OLLAMA_VIDEO_MAX_FRAMES`` of them, spread from the first to the
+        last, are analysed one after another. Motion between frames is not
+        visible to the model.
+        """
+        duration_ms = await video_duration_ms(video_path)
+        coverage = (
+            ""
+            if duration_ms
+            else (
+                "ffprobe could not read the video's length, so frames were sampled from at "
+                "most its first "
+                f"{OLLAMA_VIDEO_SCAN_INTERVAL_MS * OLLAMA_VIDEO_SCAN_MAX_FRAMES / 1000:.0f} s."
+            )
         )
+        # The similarity filter drops candidates from the result but not from disk,
+        # so every candidate goes in a directory owned (and removed) here.
+        work_dir = Path(tempfile.mkdtemp(prefix="animawatch_frames_"))
+        try:
+            extraction = await extract_frames(
+                video_path,
+                interval_ms=scan_interval_ms(duration_ms),
+                max_frames=OLLAMA_VIDEO_SCAN_MAX_FRAMES,
+                output_dir=work_dir,
+            )
+            if not extraction.frames:
+                raise RuntimeError(
+                    "Could not extract frames from the video for Ollama: install ffmpeg "
+                    "and make sure it is on PATH."
+                )
+            sampled = spread(extraction.frames, OLLAMA_VIDEO_MAX_FRAMES)
+            results: list[str | AnalysisResult] = []
+            for frame in sampled:
+                frame_prompt = (
+                    f"This is a still frame taken {frame.timestamp_ms / 1000:.1f}s into a "
+                    f"screen recording.\n\n{prompt}"
+                )
+                results.append(await self.analyze_image(frame.path, frame_prompt, structured))
+            await cleanup_frames(extraction)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        if structured:
+            parsed = [r for r in results if isinstance(r, AnalysisResult)]
+            # A finding without its own timestamp happened in the frame it came from.
+            findings = [
+                f
+                if f.timestamp is not None
+                else f.model_copy(update={"timestamp": frame.timestamp_ms / 1000})
+                for frame, r in zip(sampled, results, strict=True)
+                if isinstance(r, AnalysisResult)
+                for f in r.findings
+            ]
+            return AnalysisResult(
+                id=str(uuid.uuid4())[:8],
+                success=True,
+                findings=findings,
+                summary=" ".join([coverage, *(r.summary for r in parsed)]).strip(),
+                overall_score=min((r.overall_score for r in parsed), default=100),
+                metadata=AnalysisMetadata(
+                    provider="ollama",
+                    model=self.model,
+                    analysis_duration_ms=sum(r.metadata.analysis_duration_ms for r in parsed),
+                ),
+            )
+        sections = [
+            f"### Frame at {frame.timestamp_ms / 1000:.1f}s\n\n"
+            + (r if isinstance(r, str) else r.to_markdown())
+            for frame, r in zip(sampled, results, strict=True)
+        ]
+        if coverage:
+            sections.insert(0, f"_{coverage}_")
+        return "\n\n".join(sections)
 
     @with_retry(VISION_RETRY_CONFIG)
     async def analyze_image(
@@ -578,7 +688,13 @@ class OllamaProvider(VisionProvider):
 
 
 def get_vision_provider() -> VisionProvider:
-    """Factory function to get the configured vision provider."""
+    """Factory function to get the configured vision provider.
+
+    Raises ValueError when vision is turned off (``VISION_PROVIDER=none``) or
+    Gemini has no API key, and ImportError when the ollama package is missing.
+    """
+    if settings.vision_provider == "none":
+        raise ValueError("Vision is turned off (VISION_PROVIDER=none).")
     if settings.vision_provider == "ollama":
         return OllamaProvider()
     return GeminiProvider()

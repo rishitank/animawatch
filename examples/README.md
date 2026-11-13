@@ -12,13 +12,16 @@ Example scripts demonstrating how to use AnimaWatch programmatically.
    uv run playwright install chromium
    ```
 
-2. Set up your Gemini API key (free):
+2. Set up your own Gemini API key:
 
    ```bash
    export GEMINI_API_KEY="your-api-key-here"
    ```
 
-   Get a free key at [Google AI Studio](https://aistudio.google.com/).
+   Create a key at [Google AI Studio](https://aistudio.google.com/). Google's free
+   tier has rate limits, and the [Gemini API terms](https://ai.google.dev/gemini-api/terms)
+   allow only paid keys when you make an app available to users in the UK, the EEA or
+   Switzerland. To run without Gemini, use Ollama (see the main README).
 
 ## Examples
 
@@ -34,7 +37,11 @@ uv run python examples/basic_animation_check.py
 - Opens a browser and navigates to a URL
 - Records for 3 seconds to capture animations
 - Sends the video to Gemini for analysis
-- Reports any jank, stuttering, or timing issues
+- Reports visible stutter, glitches and timing issues
+
+The recording runs at about 25 fps, so it cannot show dropped frames. To measure
+dropped frames, use `BrowserRecorder.measure_interaction` (or the `analyze_fps` tool),
+which measures them inside the page.
 
 ### 2. Screenshot Analysis
 
@@ -190,8 +197,9 @@ export OLLAMA_MODEL=qwen2.5-vl:7b
 uv run python examples/screenshot_analysis.py
 ```
 
-**Note**: Ollama doesn't support direct video analysis, so `basic_animation_check.py` 
-will not work with Ollama. Use screenshot-based examples instead.
+**Note**: Ollama's vision models take images, not video. For video, AnimaWatch samples
+up to 8 frames (one every 0.5 s) with `ffmpeg`, which must be on your `PATH`, and the
+model reviews each still frame.
 
 ## Writing Your Own Scripts
 
@@ -203,10 +211,10 @@ from animawatch.vision import get_vision_provider
 async def my_analysis():
     browser = BrowserRecorder()
     vision = get_vision_provider()
-    
+
     try:
         await browser.start()
-        
+
         # Record with actions
         video_path = await browser.record_interaction(
             url="https://example.com",
@@ -216,11 +224,11 @@ async def my_analysis():
             ],
             wait_time=2.0,
         )
-        
+
         # Analyze
         result = await vision.analyze_video(video_path, "Check for animation issues")
         print(result)
-        
+
     finally:
         await browser.stop()
 
@@ -233,7 +241,7 @@ asyncio.run(my_analysis())
 |--------|------------|-------------|
 | `click` | `selector` | Click an element |
 | `type` | `selector`, `text` | Type text into input |
-| `scroll` | `x`, `y` | Scroll by pixels |
+| `scroll` | `y` | Scroll down by `y` pixels (default 500) |
 | `hover` | `selector` | Hover over element |
 | `wait` | `duration` | Wait for seconds |
 

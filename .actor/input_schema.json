@@ -1,0 +1,38 @@
+{
+    "$schema": "https://apify.com/schemas/v1/input.ide.json",
+    "title": "AnimaWatch settings",
+    "description": "Settings for your own AnimaWatch MCP server. Frame timing, screenshots and Core Web Vitals need no key. The AI vision pass uses your own Gemini API key, or is off.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "geminiApiKey": {
+            "title": "Gemini API key (optional)",
+            "type": "string",
+            "description": "Your own Google Gemini API key, for the AI vision pass. Stored encrypted. If you or your users are in the UK, the EEA or Switzerland, Google's terms require a paid (billing-enabled) key. Leave empty to turn vision off.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "visionEnabled": {
+            "title": "Use AI vision",
+            "type": "boolean",
+            "description": "Review recordings and screenshots with Gemini. Needs a key above.",
+            "default": true
+        },
+        "visionModel": {
+            "title": "Gemini model",
+            "type": "string",
+            "description": "Gemini model for the vision pass. It must accept video.",
+            "editor": "textfield",
+            "default": "gemini-3.8-flash"
+        },
+        "maxWaitSeconds": {
+            "title": "Longest wait per call (seconds)",
+            "type": "integer",
+            "description": "Upper bound on how long one tool call waits or measures after loading a page.",
+            "minimum": 1,
+            "maximum": 120,
+            "default": 30
+        }
+    },
+    "required": []
+}

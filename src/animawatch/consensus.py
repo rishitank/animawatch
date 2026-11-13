@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .logging import log_extra
 from .models import AnalysisResult, Finding, Severity
-from .vision import VisionProvider, get_vision_provider
+from .vision import GeminiProvider, OllamaProvider, VisionProvider
 
 
 @dataclass
@@ -52,7 +52,7 @@ async def analyze_with_consensus(
     # Run both analyses concurrently
     async def run_gemini() -> AnalysisResult | None:
         try:
-            provider = gemini_provider or get_vision_provider()
+            provider = gemini_provider or GeminiProvider()
             result = await provider.analyze_image(image_path, prompt, structured=True)
             return result if isinstance(result, AnalysisResult) else None
         except Exception as e:
@@ -61,17 +61,10 @@ async def analyze_with_consensus(
 
     async def run_ollama() -> AnalysisResult | None:
         try:
-            from .config import settings
-
-            # Temporarily switch to Ollama
-            original = settings.vision_provider
-            settings.vision_provider = "ollama"
-            try:
-                provider = ollama_provider or get_vision_provider()
-                result = await provider.analyze_image(image_path, prompt, structured=True)
-                return result if isinstance(result, AnalysisResult) else None
-            finally:
-                settings.vision_provider = original
+            # Built directly: switching the global setting would race with other requests.
+            provider = ollama_provider or OllamaProvider()
+            result = await provider.analyze_image(image_path, prompt, structured=True)
+            return result if isinstance(result, AnalysisResult) else None
         except Exception as e:
             log_extra("Ollama analysis failed", error=str(e))
             return None

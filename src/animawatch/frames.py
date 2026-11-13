@@ -6,7 +6,10 @@ enabling efficient analysis by skipping redundant frames.
 
 import asyncio
 import hashlib
+import itertools
+import math
 import tempfile
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,13 +111,14 @@ async def _extract_with_ffmpeg(
             str(output_pattern),
         ]
 
-        # Run ffmpeg
+        # Run ffmpeg. communicate() drains its output: with wait() alone, a long
+        # video's progress output fills the pipe and ffmpeg blocks forever.
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
+        await proc.communicate()
 
         if proc.returncode != 0:
             return []
@@ -154,14 +158,16 @@ async def _extract_with_imageio(
 
         frames = []
         # Read video metadata
-        props = iio.improps(video_path, plugin="pyav")
-        fps = props.fps if hasattr(props, "fps") else 30.0
-        frame_interval = max(1, int(fps * interval_ms / 1000))
+        fps = float(iio.immeta(video_path, plugin="pyav").get("fps") or 30.0)
+        # Frame i is shown at i / fps; the schedule is infinite, so next() never ends it.
+        due = _sample_by_time((i * 1000 / fps for i in itertools.count()), interval_ms)
+        next_due = next(due)
 
         frame_count = 0
         for i, frame_data in enumerate(iio.imiter(video_path, plugin="pyav")):
-            if i % frame_interval != 0:
+            if i != next_due:
                 continue
+            next_due = next(due)
 
             # Save frame as PNG
             frame_path = output_dir / f"frame_{frame_count:04d}.png"
@@ -189,6 +195,62 @@ async def _extract_with_imageio(
     except ImportError:
         # imageio not installed, return empty
         return []
+
+
+def _sample_by_time(frame_times_ms: Iterable[float], interval_ms: int) -> Iterator[int]:
+    """Indices of the frames to keep: the first frame at or after each interval.
+
+    Choosing by elapsed time keeps the samples on schedule whatever the frame
+    rate; keeping every n-th frame with n rounded down would drift early and
+    stop short of the end of a long video.
+    """
+    step = max(1, interval_ms)
+    due = 0.0
+    for index, time_ms in enumerate(frame_times_ms):
+        if time_ms + 1e-6 >= due:
+            yield index
+            due = (math.floor((time_ms + 1e-6) / step) + 1) * step
+
+
+async def video_duration_ms(video_path: Path) -> int | None:
+    """The video's duration in milliseconds from ffprobe, or None if unknown.
+
+    Uses the container's duration. If the container has none, it takes the
+    last video packet's timestamp, which needs no decoding.
+    """
+    queries = (
+        ["-show_entries", "format=duration"],
+        ["-select_streams", "v:0", "-show_entries", "packet=pts_time"],
+    )
+    for query in queries:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe",
+                "-v",
+                "error",
+                *query,
+                "-of",
+                "csv=p=0",
+                str(video_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:  # ffprobe not installed
+            return None
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            continue
+        seconds: list[float] = []
+        for token in out.decode(errors="replace").split():
+            try:
+                value = float(token.strip(","))
+            except ValueError:  # "N/A"
+                continue
+            if math.isfinite(value) and value > 0:
+                seconds.append(value)
+        if seconds:
+            return round(max(seconds) * 1000)
+    return None
 
 
 def _hash_image(image_path: Path) -> str:

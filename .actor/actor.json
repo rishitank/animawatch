@@ -1,0 +1,17 @@
+{
+    "$schema": "https://apify.com/schemas/v1/actor.ide.json",
+    "actorSpecification": 1,
+    "name": "animawatch",
+    "title": "AnimaWatch: animation jank and visual QA MCP server",
+    "description": "MCP server that measures dropped frames and long animation frames inside a web page, and optionally reviews a recording with Gemini vision using your own API key.",
+    "version": "0.4",
+    "buildTag": "latest",
+    "usesStandbyMode": true,
+    "webServerMcpPath": "/mcp",
+    "input": "./input_schema.json",
+    "readme": "./README.md",
+    "dockerfile": "../Dockerfile",
+    "minMemoryMbytes": 1024,
+    "defaultMemoryMbytes": 2048,
+    "maxMemoryMbytes": 4096
+}

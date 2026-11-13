@@ -1,7 +1,7 @@
 [project]
 name = "animawatch"
 version = "0.3.1"
-description = "MCP server that watches web animations like a human tester - detects jank, stuttering, visual artifacts using AI vision"
+description = "MCP server that measures animation jank inside the page and finds visual artifacts with AI vision"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -46,6 +46,7 @@ ollama = [
 
 [project.scripts]
 animawatch = "animawatch.server:main"
+animawatch-actor = "animawatch.actor:main"
 
 [project.urls]
 Homepage = "https://github.com/rishitank/animawatch"
@@ -78,6 +79,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "browser: launches a real Chromium (set BROWSER_EXECUTABLE_PATH to use a preinstalled one)",
+]
 
 [tool.coverage.run]
 source = ["src"]
