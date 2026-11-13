@@ -49,7 +49,9 @@ from .devices import DeviceProfile, get_device
 from .fps import (
     CALIBRATION_JS,
     DEFAULT_REFRESH_INTERVAL_MS,
+    FRAME_BUFFER_LIMIT,
     FRAME_COLLECTOR_JS,
+    LOAF_BUFFER_LIMIT,
     TRACE_CATEGORIES,
     CompositorFrameStats,
     FrameTimingResult,
@@ -653,8 +655,16 @@ def _build_timing(
                 "The compositor trace was left out because it spans the navigation and "
                 "the new page's load, so it does not match the window measured above."
             )
-    if raw.get("overflow"):
-        notes.append("The collector's buffer filled; the end of the window was not recorded.")
+    frames_overflow = bool(raw.get("framesOverflow"))
+    if frames_overflow:
+        notes.append(
+            f"The frame buffer filled ({FRAME_BUFFER_LIMIT} frames), so the window ends at "
+            "the last recorded frame; the rest of the wait was not measured."
+        )
+    if raw.get("loafOverflow"):
+        notes.append(
+            f"Only the first {LOAF_BUFFER_LIMIT} long animation frames were kept; there were more."
+        )
     if raw.get("visibility") == "hidden":
         notes.append("The page was hidden, so the browser throttled its frames.")
     if raw.get("armedAfterNavigation"):
@@ -672,7 +682,8 @@ def _build_timing(
             interval, source = estimated, "estimated"
 
     started_at = raw.get("startedAt")
-    stopped_at = raw.get("stoppedAt")
+    # Past a full buffer nothing was recorded, so that time is not a stall.
+    stopped_at = None if frames_overflow else raw.get("stoppedAt")
     return analyze_frame_timestamps(
         timestamps,
         interval,
