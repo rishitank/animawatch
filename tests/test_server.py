@@ -206,14 +206,21 @@ class TestTools:
     """Tests for MCP tools."""
 
     @pytest.fixture
-    def mock_app_context(self) -> AppContext:
+    def recording(self, tmp_path: Path) -> Path:
+        """A recording file owned by the test, for tools that delete unsaved videos."""
+        path = tmp_path / "video.webm"
+        path.write_bytes(b"video")
+        return path
+
+    @pytest.fixture
+    def mock_app_context(self, recording: Path, tmp_path: Path) -> AppContext:
         """Create a mock AppContext for testing tools."""
         mock_browser = AsyncMock()
-        mock_browser.record_interaction = AsyncMock(return_value=Path("/tmp/video.webm"))
+        mock_browser.record_interaction = AsyncMock(return_value=recording)
         mock_browser.measure_interaction = AsyncMock(
-            return_value=InteractionResult(video_path=Path("/tmp/video.webm"), timing=SMOOTH)
+            return_value=InteractionResult(video_path=recording, timing=SMOOTH)
         )
-        mock_browser.take_screenshot = AsyncMock(return_value=Path("/tmp/screenshot.png"))
+        mock_browser.take_screenshot = AsyncMock(return_value=tmp_path / "screenshot.png")
 
         mock_vision = AsyncMock()
         mock_vision.analyze_video = AsyncMock(return_value="Video analysis result")
@@ -235,7 +242,7 @@ class TestTools:
 
     @pytest.mark.asyncio
     async def test_watch_records_and_analyzes(
-        self, mock_ctx: MagicMock, mock_app_context: AppContext
+        self, mock_ctx: MagicMock, mock_app_context: AppContext, recording: Path
     ) -> None:
         """Test watch tool records and analyzes video."""
         from animawatch.server import watch
@@ -263,6 +270,7 @@ class TestTools:
             cast(AsyncMock, mock_app_context.vision.analyze_video).assert_called_once()
             # The recording is deleted when not saved
             assert mock_app_context.recordings == {}
+            assert not recording.exists()
 
     @pytest.mark.asyncio
     async def test_watch_without_context_raises(self) -> None:
@@ -274,7 +282,7 @@ class TestTools:
 
     @pytest.mark.asyncio
     async def test_watch_saves_recording_when_requested(
-        self, mock_ctx: MagicMock, mock_app_context: AppContext
+        self, mock_ctx: MagicMock, mock_app_context: AppContext, recording: Path
     ) -> None:
         """Test watch saves recording when save_recording=True."""
         from animawatch.server import watch
@@ -285,8 +293,9 @@ class TestTools:
             ctx=mock_ctx,
         )
 
-        # Recording should be stored
-        assert len(mock_app_context.recordings) == 1
+        # Recording should be stored, and kept on disk
+        assert list(mock_app_context.recordings.values()) == [recording]
+        assert recording.exists()
 
     @pytest.mark.asyncio
     async def test_analyze_video_tool(
@@ -570,22 +579,52 @@ class TestSharedLifespan:
 
 
 class TestHttpConfiguration:
-    def test_local_bind_keeps_rebinding_protection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @staticmethod
+    async def _verdict(security: object, host: str, origin: str | None = None) -> int:
+        from mcp.server.transport_security import TransportSecurityMiddleware
+        from starlette.requests import Request
+
+        headers = [(b"host", host.encode())]
+        if origin:
+            headers.append((b"origin", origin.encode()))
+        request = Request({"type": "http", "method": "GET", "headers": headers})
+        response = await TransportSecurityMiddleware(security).validate_request(request)  # type: ignore[arg-type]
+        return 200 if response is None else response.status_code
+
+    @pytest.mark.asyncio
+    async def test_wildcard_bind_keeps_rebinding_protection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from animawatch import server
 
-        monkeypatch.setattr(server.mcp.settings, "host", server.mcp.settings.host)
-        monkeypatch.setattr(server.mcp.settings, "port", server.mcp.settings.port)
-        original = server.mcp.settings.transport_security
-        monkeypatch.setattr(server.mcp.settings, "transport_security", original)
+        for name in ("host", "port", "transport_security"):
+            monkeypatch.setattr(server.mcp.settings, name, getattr(server.mcp.settings, name))
 
-        server.configure_http("127.0.0.1", 9999)
-        assert server.mcp.settings.port == 9999
-        assert server.mcp.settings.transport_security is original
-        assert original is not None and original.enable_dns_rebinding_protection
-
-        server.configure_http("0.0.0.0", 8765)
+        server.configure_http("0.0.0.0", 8765, ["mcp.example.com"])
+        security = server.mcp.settings.transport_security
+        assert security is not None and security.enable_dns_rebinding_protection
         assert server.mcp.settings.host == "0.0.0.0"
-        assert server.mcp.settings.transport_security is None
+
+        assert await self._verdict(security, "localhost:8765") == 200
+        assert await self._verdict(security, "mcp.example.com") == 200
+        assert await self._verdict(security, "mcp.example.com", "https://mcp.example.com") == 200
+        # A rebinding page: its own domain resolves to this machine.
+        assert await self._verdict(security, "evil.example:8765") == 421
+        assert await self._verdict(security, "localhost:8765", "http://evil.example") == 403
+
+    @pytest.mark.asyncio
+    async def test_specific_bind_address_is_allowed(self) -> None:
+        from animawatch.server import http_security
+
+        security = http_security("10.0.0.5", [])
+        assert await self._verdict(security, "10.0.0.5:8765") == 200
+        assert await self._verdict(security, "10.0.0.6:8765") == 421
+
+    def test_allowed_hosts_setting_is_split(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from animawatch.config import Settings
+
+        monkeypatch.setenv("ALLOWED_HOSTS", " a.example , ,b.example")
+        assert Settings().allowed_hosts_list == ["a.example", "b.example"]
 
 
 class TestCleanupAndConsensus:
@@ -633,4 +672,144 @@ class TestCleanupAndConsensus:
         ):
             await analyze_with_consensus_tool(url="https://example.com", ctx=ctx)
         assert not shot.exists()
+        assert meter.charges == []
+
+
+class TestBoundedStores:
+    def test_oldest_entries_are_dropped(self) -> None:
+        from animawatch.server import BoundedStore
+
+        store: BoundedStore[str] = BoundedStore(2)
+        store["a"], store["b"], store["c"] = "1", "2", "3"
+        assert list(store) == ["b", "c"]
+        store["b"] = "updated"  # re-setting refreshes recency
+        store["d"] = "4"
+        assert list(store) == ["b", "d"]
+
+    def test_evicted_recordings_are_deleted(self, tmp_path: Path) -> None:
+        from animawatch import server
+
+        ctx = AppContext(browser=MagicMock(), vision=None)
+        assert isinstance(ctx.recordings, server.BoundedStore)
+        files = []
+        for i in range(server.MAX_STORED_RECORDINGS + 1):
+            path = tmp_path / f"{i}.webm"
+            path.write_bytes(b"v")
+            files.append(path)
+            ctx.recordings[str(i)] = path
+        assert not files[0].exists()
+        assert all(p.exists() for p in files[1:])
+        assert len(ctx.recordings) == server.MAX_STORED_RECORDINGS
+
+    def test_analyses_are_bounded(self) -> None:
+        from animawatch import server
+
+        ctx = AppContext(browser=MagicMock(), vision=None, analyses={"seed": "x"})
+        for i in range(server.MAX_STORED_ANALYSES + 5):
+            ctx.analyses[str(i)] = "report"
+        assert len(ctx.analyses) == server.MAX_STORED_ANALYSES
+        assert "seed" not in ctx.analyses
+
+
+class TestHostedCompare:
+    @pytest.mark.asyncio
+    async def test_no_diff_image_when_hosted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PIL import Image as PILImage
+
+        from animawatch import server
+
+        shots = []
+        for name, colour in (("a.png", "white"), ("b.png", "black")):
+            path = tmp_path / name
+            PILImage.new("RGB", (20, 20), colour).save(path)
+            shots.append(path)
+        browser = AsyncMock()
+        browser.take_screenshot = AsyncMock(side_effect=shots)
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = AppContext(browser=browser, vision=None)
+        monkeypatch.setattr(server.settings, "hosted", True)
+
+        result = await server.compare_screenshots(
+            url1="https://a.example", url2="https://b.example", ctx=ctx
+        )
+
+        assert "Differences detected" in result
+        assert "Diff image saved" not in result
+
+
+class TestConsensusReporting:
+    @pytest.fixture
+    def ctx(self, tmp_path: Path) -> MagicMock:
+        shot = tmp_path / "s.png"
+        shot.write_bytes(b"png")
+        browser = AsyncMock()
+        browser.take_screenshot = AsyncMock(return_value=shot)
+        mock_ctx = MagicMock()
+        mock_ctx.request_context.lifespan_context = AppContext(browser=browser, vision=None)
+        return mock_ctx
+
+    @pytest.mark.asyncio
+    async def test_vision_off_refuses_before_any_screenshot(
+        self, ctx: MagicMock, monkeypatch: pytest.MonkeyPatch, meter: RecordingMeter
+    ) -> None:
+        from animawatch import server
+
+        monkeypatch.setattr(server.settings, "vision_provider", "none")
+        monkeypatch.setattr(server.settings, "gemini_api_key", "a-stored-key")
+        with (
+            patch("animawatch.server.run_consensus_analysis", AsyncMock()) as consensus,
+            pytest.raises(ToolError, match="Vision is turned off"),
+        ):
+            await server.analyze_with_consensus_tool(url="https://example.com", ctx=ctx)
+        consensus.assert_not_called()
+        app_ctx = ctx.request_context.lifespan_context
+        cast(AsyncMock, app_ctx.browser.take_screenshot).assert_not_called()
+        assert meter.charges == []
+
+    @pytest.mark.asyncio
+    async def test_one_model_is_not_reported_as_agreement(
+        self, ctx: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from animawatch import server
+        from animawatch.consensus import ConsensusResult
+        from animawatch.models import AnalysisMetadata, AnalysisResult
+
+        monkeypatch.setattr(server.settings, "vision_provider", "gemini")
+        ollama_only = AnalysisResult(
+            id="o",
+            success=True,
+            findings=[],
+            summary="clean",
+            overall_score=100,
+            metadata=AnalysisMetadata(provider="ollama", model="m", analysis_duration_ms=1),
+        )
+        result = ConsensusResult([], [], [], [], None, ollama_only, 100.0)
+        with patch("animawatch.server.run_consensus_analysis", AsyncMock(return_value=result)):
+            output = await server.analyze_with_consensus_tool(url="https://example.com", ctx=ctx)
+
+        assert "Consensus Score" not in output
+        assert "Gemini did not return an analysis" in output
+        assert "Ollama found no issues" in output
+        assert "either model" not in output
+
+
+class TestToolActionValidation:
+    @pytest.mark.asyncio
+    async def test_bad_actions_are_refused_before_work_or_charge(
+        self, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import analyze_fps, watch
+
+        browser = AsyncMock()
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = AppContext(browser=browser, vision=None)
+        bad = [{"type": "click"}]  # no selector
+
+        with pytest.raises(ToolError, match="Invalid actions"):
+            await analyze_fps(url="https://example.com", actions=bad, ctx=ctx)  # type: ignore[arg-type]
+        with pytest.raises(ToolError, match="Invalid actions"):
+            await watch(url="https://example.com", actions=bad, ctx=ctx)  # type: ignore[arg-type]
+        cast(AsyncMock, browser.measure_interaction).assert_not_called()
         assert meter.charges == []
