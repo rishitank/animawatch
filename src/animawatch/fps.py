@@ -37,15 +37,14 @@ from typing import Any, Literal
 
 #: Defines ``window.__animawatchFrames`` in a document (once). It does nothing
 #: until ``start()`` is called: the rAF loop only runs while measuring, so the
-#: page is not kept painting outside the window. ``armAfterLoad()`` starts
-#: measurement once the document has loaded and its network has been quiet for
-#: ``QUIET_MS`` (an in-page stand-in for Playwright's "networkidle"), so a
-#: page reached by a navigating action is measured without its load work.
+#: page is not kept painting outside the window. ``restart()`` starts measuring
+#: in a document that replaced the measured one; the browser module calls it
+#: once that page has loaded and its network has gone quiet, so the new page's
+#: load work is not counted.
 _COLLECTOR_BODY = r"""
   if (!window.__animawatchFrames) {
     const MAX_FRAMES = 20000;
     const MAX_LOAF = 500;
-    const QUIET_MS = 500;
     const state = {
       running: false,
       timestamps: [],
@@ -96,27 +95,17 @@ _COLLECTOR_BODY = r"""
       state.running = true;
       requestAnimationFrame(tick);
     };
-    const lastNetworkActivity = () => {
-      let last = 0;
-      for (const r of performance.getEntriesByType('resource')) {
-        last = Math.max(last, r.responseEnd || r.startTime);
-      }
-      return last;
-    };
-    const startWhenQuiet = () => {
-      const quietFor = performance.now() - lastNetworkActivity();
-      if (quietFor >= QUIET_MS) { start(); return; }
-      setTimeout(startWhenQuiet, QUIET_MS - quietFor);
-    };
     Object.defineProperty(window, '__animawatchFrames', {
       configurable: false,
       enumerable: false,
       value: Object.freeze({
         start,
-        armAfterLoad() {
+        restart() {
+          // A same-document navigation (pushState, #hash) leaves this running.
+          if (state.running) { return false; }
           state.armedAfterNavigation = true;
-          if (document.readyState === 'complete') { startWhenQuiet(); }
-          else { window.addEventListener('load', startWhenQuiet, { once: true }); }
+          start();
+          return true;
         },
         stop() {
           state.running = false;
@@ -140,16 +129,9 @@ _COLLECTOR_BODY = r"""
   }
 """
 
-#: Installed with ``BrowserContext.add_init_script`` before the page loads.
+#: Installed with ``BrowserContext.add_init_script`` before the page loads, so
+#: every document in the context, including one reached by navigating, has it.
 FRAME_COLLECTOR_JS = "(() => {" + _COLLECTOR_BODY + "})();"
-
-#: Installed once measurement has started, for documents that replace the
-#: measured one (a click that navigates). Playwright does not define the order
-#: of several init scripts, so this one also defines the collector if it runs
-#: first, and then arms it to start after the new page has loaded.
-FRAME_AUTOSTART_JS = (
-    "(() => {" + _COLLECTOR_BODY + "  window.__animawatchFrames.armAfterLoad();\n})();"
-)
 
 #: Samples ``count`` + 1 rAF timestamps on an idle page (resolves early after
 #: two seconds if the page is throttled).

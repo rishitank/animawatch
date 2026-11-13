@@ -6,6 +6,7 @@ enabling efficient analysis by skipping redundant frames.
 
 import asyncio
 import hashlib
+import math
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,13 +109,14 @@ async def _extract_with_ffmpeg(
             str(output_pattern),
         ]
 
-        # Run ffmpeg
+        # Run ffmpeg. communicate() drains its output: with wait() alone, a long
+        # video's progress output fills the pipe and ffmpeg blocks forever.
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
+        await proc.communicate()
 
         if proc.returncode != 0:
             return []
@@ -189,6 +191,47 @@ async def _extract_with_imageio(
     except ImportError:
         # imageio not installed, return empty
         return []
+
+
+async def video_duration_ms(video_path: Path) -> int | None:
+    """The video's duration in milliseconds from ffprobe, or None if unknown.
+
+    Uses the container's duration. If the container has none, it takes the
+    last video packet's timestamp, which needs no decoding.
+    """
+    queries = (
+        ["-show_entries", "format=duration"],
+        ["-select_streams", "v:0", "-show_entries", "packet=pts_time"],
+    )
+    for query in queries:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe",
+                "-v",
+                "error",
+                *query,
+                "-of",
+                "csv=p=0",
+                str(video_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:  # ffprobe not installed
+            return None
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            continue
+        seconds: list[float] = []
+        for token in out.decode(errors="replace").split():
+            try:
+                value = float(token.strip(","))
+            except ValueError:  # "N/A"
+                continue
+            if math.isfinite(value) and value > 0:
+                seconds.append(value)
+        if seconds:
+            return round(max(seconds) * 1000)
+    return None
 
 
 def _hash_image(image_path: Path) -> str:
