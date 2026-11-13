@@ -73,7 +73,13 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Install Playwright browsers
-        run: uv run playwright install chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Install the Apify SDK (Actor end-to-end test; not a package dependency)
+        run: uv pip install "apify>=4.0.0,<5"
+
+      - name: Install ffmpeg (Ollama frame-sampling test)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: Run tests with coverage
         run: uv run pytest --cov=src --cov-report=xml
