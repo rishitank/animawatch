@@ -26,7 +26,7 @@ Authorization: Bearer <your Apify API token>
 | Field | What it does |
 |---|---|
 | `geminiApiKey` | Your own Gemini API key, stored encrypted. Leave it empty to turn vision off. If you or your users are in the UK, the EEA or Switzerland, Google's Gemini API terms require a paid (billing-enabled) key. |
-| `visionEnabled` | Turns vision on or off. |
+| `visionEnabled` | Turns vision on or off. When it is off, the key is not used. |
 | `visionModel` | The Gemini model to use. The default is `gemini-3.8-flash`, and the model must accept video. |
 | `maxWaitSeconds` | The longest one call waits or measures after a page loads (1 to 120 seconds). |
 
@@ -34,7 +34,7 @@ Authorization: Bearer <your Apify API token>
 
 - `analyze_fps`: dropped frames and long animation frames for a URL, after optional actions.
 - `watch` and `watch_with_device`: frame timing plus a vision review of the recording.
-- `screenshot`, `check_accessibility`, `compare_screenshots`, `get_performance_metrics`, `analyze_with_consensus_tool` and `list_devices`.
+- `screenshot`, `check_accessibility`, `compare_screenshots`, `get_performance_metrics` and `list_devices`.
 
 Only `http` and `https` URLs are opened.
 
