@@ -1,0 +1,7 @@
+{
+    "page-analysed": {
+        "eventTitle": "Page analysed",
+        "eventDescription": "One web page loaded and analysed by a tool (frame timing, screenshot, Core Web Vitals or AI vision). Comparing two pages counts as two.",
+        "eventPriceUsd": 0.05
+    }
+}

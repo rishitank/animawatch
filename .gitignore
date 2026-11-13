@@ -70,3 +70,6 @@ Thumbs.db
 # Coverage
 coverage.xml
 
+
+# Apify local storage
+storage/
