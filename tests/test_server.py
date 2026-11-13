@@ -1,11 +1,17 @@
 """Tests for AnimaWatch MCP server module."""
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.utilities.types import Image
 
+from animawatch import billing
+from animawatch.browser import InteractionResult
+from animawatch.fps import analyze_frame_timestamps
 from animawatch.server import (
     ANIMATION_PROMPT,
     AppContext,
@@ -16,6 +22,34 @@ from animawatch.server import (
     get_recording,
     page_analysis,
 )
+
+SMOOTH = analyze_frame_timestamps(
+    [i * 1000 / 60 for i in range(181)], 1000 / 60, refresh_source="calibrated"
+)
+
+
+class RecordingMeter:
+    """A meter that records charges and can be set to refuse."""
+
+    def __init__(self, remaining: int | None = None) -> None:
+        self._remaining = remaining
+        self.charges: list[tuple[str, int]] = []
+
+    async def remaining(self, event: str) -> int | None:
+        return self._remaining
+
+    async def charge(self, event: str, count: int) -> None:
+        self.charges.append((event, count))
+
+
+@pytest.fixture
+def meter() -> Iterator[RecordingMeter]:
+    recording = RecordingMeter()
+    billing.set_meter(recording)
+    try:
+        yield recording
+    finally:
+        billing.set_meter(billing.NoopMeter())
 
 
 class TestAppContext:
@@ -155,7 +189,7 @@ class TestResources:
         """Test get_config returns current configuration."""
         with patch("animawatch.server.settings") as mock_settings:
             mock_settings.vision_provider = "gemini"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
             mock_settings.browser_headless = True
             mock_settings.video_width = 1280
             mock_settings.video_height = 720
@@ -176,6 +210,9 @@ class TestTools:
         """Create a mock AppContext for testing tools."""
         mock_browser = AsyncMock()
         mock_browser.record_interaction = AsyncMock(return_value=Path("/tmp/video.webm"))
+        mock_browser.measure_interaction = AsyncMock(
+            return_value=InteractionResult(video_path=Path("/tmp/video.webm"), timing=SMOOTH)
+        )
         mock_browser.take_screenshot = AsyncMock(return_value=Path("/tmp/screenshot.png"))
 
         mock_vision = AsyncMock()
@@ -216,8 +253,16 @@ class TestTools:
             assert result.startswith("## 🎬 Animation Analysis")
             assert "Analysis ID" in result
             assert "abc12345" in result  # Check the mocked UUID is present
-            cast(AsyncMock, mock_app_context.browser.record_interaction).assert_called_once()
+            assert "### Frame timing" in result
+            assert "Dropped frames**: 0 of 180" in result
+            assert "### Vision analysis" in result
+            assert "Video analysis result" in result
+            measure = cast(AsyncMock, mock_app_context.browser.measure_interaction)
+            measure.assert_called_once()
+            assert measure.call_args.kwargs["record_video"] is True
             cast(AsyncMock, mock_app_context.vision.analyze_video).assert_called_once()
+            # The recording is deleted when not saved
+            assert mock_app_context.recordings == {}
 
     @pytest.mark.asyncio
     async def test_watch_without_context_raises(self) -> None:
@@ -303,3 +348,289 @@ class TestTools:
         assert "Accessibility Analysis" in result
         cast(AsyncMock, mock_app_context.browser.take_screenshot).assert_called_once()
         cast(AsyncMock, mock_app_context.vision.analyze_image).assert_called_once()
+
+
+class TestFrameTimingAndVisionOff:
+    """Tools after the switch to in-page timing, with and without vision."""
+
+    @pytest.fixture
+    def app_ctx(self) -> AppContext:
+        browser = AsyncMock()
+        browser.measure_interaction = AsyncMock(
+            return_value=InteractionResult(video_path=None, timing=SMOOTH)
+        )
+        browser.take_screenshot = AsyncMock()
+        return AppContext(
+            browser=browser,
+            vision=None,
+            vision_unavailable_reason="Vision is off: GEMINI_API_KEY is not set.",
+        )
+
+    @pytest.fixture
+    def ctx(self, app_ctx: AppContext) -> MagicMock:
+        mock_ctx = MagicMock()
+        mock_ctx.request_context.lifespan_context = app_ctx
+        return mock_ctx
+
+    @pytest.mark.asyncio
+    async def test_analyze_fps_measures_in_page_and_charges_once(
+        self, ctx: MagicMock, app_ctx: AppContext, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import analyze_fps
+
+        result = await analyze_fps(
+            url="https://example.com",
+            duration=2.0,
+            refresh_rate_hz=120.0,
+            trace_compositor=True,
+            ctx=ctx,
+        )
+
+        assert "Frame Timing for https://example.com" in result
+        assert "Verdict**: smooth" in result
+        kwargs = cast(AsyncMock, app_ctx.browser.measure_interaction).call_args.kwargs
+        assert kwargs["refresh_rate_hz"] == 120.0
+        assert kwargs["trace_compositor"] is True
+        assert "record_video" not in kwargs  # no video for timing
+        assert meter.charges == [(billing.PAGE_ANALYSED, 1)]
+
+    @pytest.mark.asyncio
+    async def test_analyze_fps_rejects_bad_input_without_charging(
+        self, ctx: MagicMock, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import analyze_fps
+
+        with pytest.raises(ToolError, match="not allowed"):
+            await analyze_fps(url="javascript:alert(1)", ctx=ctx)
+        with pytest.raises(ToolError, match="refresh_rate_hz"):
+            await analyze_fps(url="https://example.com", refresh_rate_hz=5000, ctx=ctx)
+        assert "not found" in await analyze_fps(url="https://example.com", device="nope", ctx=ctx)
+        assert meter.charges == []
+
+    @pytest.mark.asyncio
+    async def test_spending_limit_refuses_before_loading(
+        self, ctx: MagicMock, app_ctx: AppContext
+    ) -> None:
+        from animawatch.server import analyze_fps, compare_screenshots
+
+        billing.set_meter(RecordingMeter(remaining=1))
+        try:
+            with pytest.raises(ToolError, match="spending limit"):
+                await compare_screenshots(
+                    url1="https://a.example", url2="https://b.example", ctx=ctx
+                )
+            billing.set_meter(RecordingMeter(remaining=0))
+            with pytest.raises(ToolError, match="spending limit"):
+                await analyze_fps(url="https://example.com", ctx=ctx)
+        finally:
+            billing.set_meter(billing.NoopMeter())
+        cast(AsyncMock, app_ctx.browser.measure_interaction).assert_not_called()
+        cast(AsyncMock, app_ctx.browser.take_screenshot).assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_watch_without_vision_returns_timing_only(
+        self, ctx: MagicMock, app_ctx: AppContext, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import watch
+
+        result = await watch(url="https://example.com", ctx=ctx)
+
+        assert "### Frame timing" in result
+        assert "GEMINI_API_KEY is not set" in result
+        assert "Frame timing only" in result
+        kwargs = cast(AsyncMock, app_ctx.browser.measure_interaction).call_args.kwargs
+        assert kwargs["record_video"] is False  # no vision, no recording needed
+        assert meter.charges == [(billing.PAGE_ANALYSED, 1)]
+
+    @pytest.mark.asyncio
+    async def test_watch_with_device_measures_with_device(
+        self, ctx: MagicMock, app_ctx: AppContext, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import watch_with_device
+
+        result = await watch_with_device(url="https://example.com", device="iphone_15_pro", ctx=ctx)
+
+        assert "Device Animation Analysis" in result
+        assert "### Frame timing" in result
+        kwargs = cast(AsyncMock, app_ctx.browser.measure_interaction).call_args.kwargs
+        assert kwargs["device"] == "iphone_15_pro"
+        assert meter.charges == [(billing.PAGE_ANALYSED, 1)]
+
+    @pytest.mark.asyncio
+    async def test_vision_tools_explain_how_to_turn_vision_on(
+        self, ctx: MagicMock, app_ctx: AppContext, tmp_path: Path, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import analyze_video, check_accessibility
+
+        with pytest.raises(ToolError, match="paid key"):
+            await check_accessibility(url="https://example.com", ctx=ctx)
+        with pytest.raises(ToolError, match="VISION_PROVIDER=ollama"):
+            await analyze_video(video_path=str(tmp_path / "v.webm"), ctx=ctx)
+        cast(AsyncMock, app_ctx.browser.take_screenshot).assert_not_called()
+        assert meter.charges == []
+
+    @pytest.mark.asyncio
+    async def test_screenshot_without_vision_still_returns_image(
+        self, ctx: MagicMock, app_ctx: AppContext, tmp_path: Path, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import screenshot
+
+        shot = tmp_path / "shot.png"
+        shot.write_bytes(b"\x89PNG fake")
+        cast(AsyncMock, app_ctx.browser.take_screenshot).return_value = shot
+
+        image = await screenshot(url="https://example.com", ctx=ctx)
+
+        assert isinstance(image, Image)
+        assert not shot.exists()  # temp file removed
+        assert any("GEMINI_API_KEY" in a for a in app_ctx.analyses.values())
+        assert meter.charges == [(billing.PAGE_ANALYSED, 1)]
+
+    @pytest.mark.asyncio
+    async def test_compare_screenshots_charges_two_pages(
+        self, ctx: MagicMock, app_ctx: AppContext, tmp_path: Path, meter: RecordingMeter
+    ) -> None:
+        from PIL import Image as PILImage
+
+        from animawatch.server import compare_screenshots
+
+        shots = []
+        for name in ("a.png", "b.png"):
+            path = tmp_path / name
+            PILImage.new("RGB", (20, 20), "white").save(path)
+            shots.append(path)
+        cast(AsyncMock, app_ctx.browser.take_screenshot).side_effect = shots
+
+        result = await compare_screenshots(
+            url1="https://a.example", url2="https://b.example", ctx=ctx
+        )
+
+        assert "No visual differences" in result
+        assert meter.charges == [(billing.PAGE_ANALYSED, 2)]
+        assert not any(p.exists() for p in shots)
+
+    @pytest.mark.asyncio
+    async def test_failed_work_is_not_charged(
+        self, ctx: MagicMock, app_ctx: AppContext, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import analyze_fps
+
+        cast(AsyncMock, app_ctx.browser.measure_interaction).side_effect = TimeoutError("slow")
+        with pytest.raises(TimeoutError):
+            await analyze_fps(url="https://example.com", ctx=ctx)
+        assert meter.charges == []
+
+
+class TestVisionProviderCreation:
+    def test_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from animawatch.server import create_vision_provider, settings
+
+        monkeypatch.setattr(settings, "vision_provider", "none")
+        provider, reason = create_vision_provider()
+        assert provider is None
+        assert "turned off" in reason
+
+    def test_missing_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from animawatch.server import create_vision_provider, settings
+
+        monkeypatch.setattr(settings, "vision_provider", "gemini")
+        monkeypatch.setattr(settings, "gemini_api_key", "")
+        provider, reason = create_vision_provider()
+        assert provider is None
+        assert "GEMINI_API_KEY" in reason
+
+
+class TestSharedLifespan:
+    @pytest.mark.asyncio
+    async def test_sessions_share_one_browser(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from animawatch import server
+
+        started: list[MagicMock] = []
+
+        def fake_recorder() -> MagicMock:
+            recorder = MagicMock()
+            recorder.start = AsyncMock()
+            recorder.stop = AsyncMock()
+            started.append(recorder)
+            return recorder
+
+        monkeypatch.setattr(server, "BrowserRecorder", fake_recorder)
+        monkeypatch.setattr(server, "create_vision_provider", lambda: (None, "off"))
+
+        async with server.app_lifespan(server.mcp) as first:
+            async with server.app_lifespan(server.mcp) as second:
+                assert first is second
+            started[0].stop.assert_not_called()
+        assert len(started) == 1
+        started[0].stop.assert_awaited_once()
+
+        async with server.app_lifespan(server.mcp) as third:
+            assert third is not first  # a fresh context after the last session ended
+        assert len(started) == 2
+
+
+class TestHttpConfiguration:
+    def test_local_bind_keeps_rebinding_protection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from animawatch import server
+
+        monkeypatch.setattr(server.mcp.settings, "host", server.mcp.settings.host)
+        monkeypatch.setattr(server.mcp.settings, "port", server.mcp.settings.port)
+        original = server.mcp.settings.transport_security
+        monkeypatch.setattr(server.mcp.settings, "transport_security", original)
+
+        server.configure_http("127.0.0.1", 9999)
+        assert server.mcp.settings.port == 9999
+        assert server.mcp.settings.transport_security is original
+        assert original is not None and original.enable_dns_rebinding_protection
+
+        server.configure_http("0.0.0.0", 8765)
+        assert server.mcp.settings.host == "0.0.0.0"
+        assert server.mcp.settings.transport_security is None
+
+
+class TestCleanupAndConsensus:
+    @pytest.mark.asyncio
+    async def test_recording_deleted_when_vision_fails(
+        self, tmp_path: Path, meter: RecordingMeter
+    ) -> None:
+        from animawatch.server import watch
+
+        video = tmp_path / "v.webm"
+        video.write_bytes(b"video")
+        browser = AsyncMock()
+        browser.measure_interaction = AsyncMock(
+            return_value=InteractionResult(video_path=video, timing=SMOOTH)
+        )
+        vision = AsyncMock()
+        vision.analyze_video = AsyncMock(side_effect=RuntimeError("quota"))
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = AppContext(browser=browser, vision=vision)
+
+        with pytest.raises(RuntimeError, match="quota"):
+            await watch(url="https://example.com", ctx=ctx)
+
+        assert not video.exists()
+        assert meter.charges == []
+
+    @pytest.mark.asyncio
+    async def test_consensus_with_no_model_is_an_error_not_a_clean_bill(
+        self, tmp_path: Path, meter: RecordingMeter
+    ) -> None:
+        from animawatch.consensus import ConsensusResult
+        from animawatch.server import analyze_with_consensus_tool
+
+        shot = tmp_path / "s.png"
+        shot.write_bytes(b"png")
+        browser = AsyncMock()
+        browser.take_screenshot = AsyncMock(return_value=shot)
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = AppContext(browser=browser, vision=None)
+        empty = ConsensusResult([], [], [], [], None, None, 100.0)
+
+        with (
+            patch("animawatch.server.run_consensus_analysis", AsyncMock(return_value=empty)),
+            pytest.raises(ToolError, match="Neither Gemini nor Ollama"),
+        ):
+            await analyze_with_consensus_tool(url="https://example.com", ctx=ctx)
+        assert not shot.exists()
+        assert meter.charges == []
