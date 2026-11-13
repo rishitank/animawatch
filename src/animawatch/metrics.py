@@ -9,6 +9,51 @@ from typing import Any
 
 from playwright.async_api import Page
 
+#: Reads LCP, FCP and CLS in the page. LCP is the last largest-contentful-paint
+#: entry; CLS is the largest session window of layout shifts without recent
+#: input (gaps under 1 s, windows up to 5 s), as web.dev defines it.
+CORE_WEB_VITALS_JS = """() => {
+    const buffered = (type) => {
+        try {
+            const observer = new PerformanceObserver(() => {});
+            observer.observe({ type, buffered: true });
+            const records = observer.takeRecords();
+            observer.disconnect();
+            return records;
+        } catch (e) {
+            return [];
+        }
+    };
+    const result = {};
+
+    const lcp = buffered('largest-contentful-paint');
+    if (lcp.length > 0) {
+        result.lcp = lcp[lcp.length - 1].startTime;
+    }
+
+    for (const entry of performance.getEntriesByType('paint')) {
+        if (entry.name === 'first-contentful-paint') {
+            result.fcp = entry.startTime;
+        }
+    }
+
+    let cls = 0, windowValue = 0, windowStart = 0, previous = 0;
+    for (const shift of buffered('layout-shift')) {
+        if (shift.hadRecentInput) { continue; }
+        const t = shift.startTime;
+        if (windowValue > 0 && t - previous < 1000 && t - windowStart < 5000) {
+            windowValue += shift.value;
+        } else {
+            windowValue = shift.value;
+            windowStart = t;
+        }
+        previous = t;
+        cls = Math.max(cls, windowValue);
+    }
+    result.cls = cls;
+    return result;
+}"""
+
 
 @dataclass
 class CoreWebVitals:
@@ -101,7 +146,7 @@ async def extract_performance_metrics(page: Page, url: str) -> PerformanceMetric
         return perf ? {
             loadTime: perf.loadEventEnd - perf.startTime,
             domContentLoaded: perf.domContentLoadedEventEnd - perf.startTime,
-            ttfb: perf.responseStart - perf.requestStart,
+            ttfb: perf.responseStart,
         } : null;
     }""")
 
@@ -114,32 +159,10 @@ async def extract_performance_metrics(page: Page, url: str) -> PerformanceMetric
         };
     }""")
 
-    # Get Core Web Vitals using web-vitals library pattern
-    vitals = await page.evaluate("""() => {
-        const result = {};
-
-        // LCP from largest-contentful-paint entries
-        const lcpEntries = performance.getEntriesByType('largest-contentful-paint');
-        if (lcpEntries.length > 0) {
-            result.lcp = lcpEntries[lcpEntries.length - 1].startTime;
-        }
-
-        // FCP from paint entries
-        const paintEntries = performance.getEntriesByType('paint');
-        for (const entry of paintEntries) {
-            if (entry.name === 'first-contentful-paint') {
-                result.fcp = entry.startTime;
-            }
-        }
-
-        // CLS from layout-shift entries
-        const clsEntries = performance.getEntriesByType('layout-shift');
-        result.cls = clsEntries
-            .filter(e => !e.hadRecentInput)
-            .reduce((sum, e) => sum + e.value, 0);
-
-        return result;
-    }""")
+    # Core Web Vitals. LCP and layout-shift entries are not in the performance
+    # timeline buffer (getEntriesByType returns none), so they are read from a
+    # PerformanceObserver with buffered: true.
+    vitals = await page.evaluate(CORE_WEB_VITALS_JS)
 
     # Get memory info if available
     memory = await page.evaluate("""() => {
