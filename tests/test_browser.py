@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from animawatch.actions import InvalidActionsError, parse_actions
 from animawatch.browser import (
     BrowserRecorder,
     InteractionResult,
@@ -177,15 +178,14 @@ class TestBrowserRecorderActions:
         mock_page.evaluate.assert_called_once_with("(y) => window.scrollBy(0, y)", 300.0)
 
     @pytest.mark.asyncio
-    async def test_scroll_never_formats_input_into_script(self, recorder: BrowserRecorder) -> None:
-        """A non-numeric y is not interpolated into JavaScript (it was before)."""
+    async def test_scroll_rejects_non_numeric_offsets(self, recorder: BrowserRecorder) -> None:
+        """A non-numeric y is refused, never interpolated into JavaScript (it was before)."""
         mock_page = AsyncMock()
 
-        await recorder._perform_action(mock_page, {"type": "scroll", "y": "0); alert(1"})
-        await recorder._perform_action(mock_page, {"type": "scroll", "y": float("inf")})
-
-        for call in mock_page.evaluate.call_args_list:
-            assert call.args == ("(y) => window.scrollBy(0, y)", 500.0)
+        for bad in ("0); alert(1", float("inf"), float("nan")):
+            with pytest.raises(InvalidActionsError, match="actions"):
+                await recorder._perform_action(mock_page, {"type": "scroll", "y": bad})
+        mock_page.evaluate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_wait_is_capped_by_max_recording_duration(
@@ -217,22 +217,19 @@ class TestBrowserRecorderActions:
             mock_sleep.assert_called_once_with(0.1)
 
     @pytest.mark.asyncio
-    async def test_perform_action_unknown_type(self, recorder: BrowserRecorder) -> None:
-        """Test that unknown action types are ignored."""
-        mock_page = AsyncMock()
-        action = {"type": "unknown_action"}
-
-        # Should not raise
-        await recorder._perform_action(mock_page, action)
+    async def test_perform_action_unknown_type_is_rejected(self, recorder: BrowserRecorder) -> None:
+        """An unknown action is an error, not a silent no-op."""
+        with pytest.raises(InvalidActionsError, match="unknown_action"):
+            await recorder._perform_action(AsyncMock(), {"type": "unknown_action"})
 
     @pytest.mark.asyncio
-    async def test_perform_action_click_without_selector(self, recorder: BrowserRecorder) -> None:
-        """Test click action without selector does nothing."""
+    async def test_perform_action_click_without_selector_is_rejected(
+        self, recorder: BrowserRecorder
+    ) -> None:
+        """A click with no selector is an error, so the measurement never skips it."""
         mock_page = AsyncMock()
-        action = {"type": "click"}
-
-        await recorder._perform_action(mock_page, action)
-
+        with pytest.raises(InvalidActionsError, match="selector"):
+            await recorder._perform_action(mock_page, {"type": "click"})
         mock_page.click.assert_not_called()
 
 
@@ -368,3 +365,40 @@ class TestBuildTiming:
         result = _build_timing(self._raw(timestamps=[]), None, "estimated", 1000.0, None, [])
         assert result.refresh_source == "assumed"
         assert result.refresh_interval_ms == pytest.approx(1000 / 60)
+
+
+class TestActionValidation:
+    def test_valid_actions_parse(self) -> None:
+        parsed = parse_actions(
+            [
+                {"type": "click", "selector": "#a"},
+                {"type": "type", "selector": "#b", "text": "hi"},
+                {"type": "scroll", "y": -200},
+                {"type": "hover", "selector": "#c"},
+                {"type": "wait", "duration": 0.5},
+            ]
+        )
+        assert [a.type for a in parsed] == ["click", "type", "scroll", "hover", "wait"]
+        assert parse_actions(None) == []
+        assert parse_actions(parsed) == parsed  # models pass through
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"type": "wait", "duration": -1},
+            {"type": "click", "selector": ""},
+            {"type": "click", "selecter": "#typo"},
+            {"selector": "#no-type"},
+        ],
+    )
+    def test_invalid_actions_are_rejected(self, bad: dict[str, object]) -> None:
+        with pytest.raises(InvalidActionsError):
+            parse_actions([bad])
+
+    @pytest.mark.asyncio
+    async def test_measure_rejects_bad_actions_before_opening_a_page(self) -> None:
+        recorder = BrowserRecorder()
+        recorder._browser = AsyncMock()
+        with pytest.raises(InvalidActionsError):
+            await recorder.measure_interaction("https://example.com", [{"type": "click"}])
+        recorder._browser.new_context.assert_not_called()

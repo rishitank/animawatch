@@ -107,8 +107,10 @@ async def test_navigation_during_measurement_is_reported(
 
     assert result.timing is not None
     assert any("navigated" in note for note in result.timing.notes), result.timing.notes
-    # Measurement re-armed itself in the new document.
+    # Measurement re-armed itself in the new document, after that page loaded.
+    assert any("restarted once the new page" in n for n in result.timing.notes)
     assert result.timing.frames_presented > 30
+    assert result.timing.jank_percentage < 2.0, result.timing
 
 
 async def test_configured_refresh_rate_is_used(chromium: BrowserRecorder, page_server: str) -> None:
