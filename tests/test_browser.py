@@ -351,6 +351,24 @@ class TestBuildTiming:
         assert "buffer filled" in notes
         assert "hidden" in notes
 
+    def test_new_page_that_never_went_quiet_is_explained(self) -> None:
+        raw = self._raw(timeOrigin=2000.0, timestamps=[], startedAt=None)
+        result = _build_timing(raw, 16.7, "calibrated", 1000.0, None, [])
+        assert result.frames_presented == 0
+        assert any("did not go quiet" in n for n in result.notes), result.notes
+
+    def test_compositor_trace_dropped_after_navigation(self) -> None:
+        from animawatch.fps import CompositorFrameStats
+
+        stats = CompositorFrameStats(presented_all=50, presented_partial=0, dropped=0, no_update=0)
+        navigated = _build_timing(
+            self._raw(timeOrigin=2000.0), 16.7, "calibrated", 1000.0, stats, []
+        )
+        assert navigated.compositor is None
+        assert any("compositor trace was left out" in n for n in navigated.notes)
+        same_page = _build_timing(self._raw(), 16.7, "calibrated", 1000.0, stats, [])
+        assert same_page.compositor == stats
+
     def test_missing_collector(self) -> None:
         result = _build_timing(None, 16.7, "calibrated", 1000.0, None, [])
         assert result.frames_presented == 0

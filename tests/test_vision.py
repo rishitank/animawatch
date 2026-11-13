@@ -8,10 +8,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from animawatch.cache import AnalysisCache, analysis_cache
-from animawatch.frames import ExtractedFrame, FrameExtractionResult
+from animawatch.frames import ExtractedFrame, FrameExtractionResult, video_duration_ms
 from animawatch.models import AnalysisResult
 from animawatch.retry import vision_circuit
-from animawatch.vision import GeminiProvider, OllamaProvider, get_vision_provider, spread
+from animawatch.vision import (
+    OLLAMA_VIDEO_SCAN_INTERVAL_MS,
+    OLLAMA_VIDEO_SCAN_MAX_FRAMES,
+    GeminiProvider,
+    OllamaProvider,
+    get_vision_provider,
+    scan_interval_ms,
+    spread,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -250,7 +258,7 @@ class TestOllamaProvider:
         return provider
 
     @staticmethod
-    def _make_video(path: Path, seconds: int) -> Path:
+    def _make_video(path: Path, seconds: int, rate: int = 25) -> Path:
         made = subprocess.run(
             [
                 "ffmpeg",
@@ -259,7 +267,7 @@ class TestOllamaProvider:
                 "-f",
                 "lavfi",
                 "-i",
-                f"testsrc=duration={seconds}:size=160x120:rate=25",
+                f"testsrc=duration={seconds}:size=160x120:rate={rate}",
                 "-c:v",
                 "libvpx",
                 "-y",
@@ -306,6 +314,28 @@ class TestOllamaProvider:
         assert times[0] == 0.0
         assert times[-1] >= 11.0
         assert times == sorted(times)
+
+    @pytest.mark.asyncio
+    async def test_analyze_video_covers_a_recording_longer_than_the_scan(
+        self, tmp_path: Path
+    ) -> None:
+        """A 75 s video is longer than 240 frames at 250 ms; the scan widens to cover it."""
+        video = self._make_video(tmp_path / "long.webm", 75, rate=5)
+        assert await video_duration_ms(video) == pytest.approx(75_000, abs=500)
+
+        client = AsyncMock()
+        client.chat.return_value = {"message": {"content": "ok"}}
+        result = await self._provider(client).analyze_video(video, "Analyze")
+
+        assert isinstance(result, str)
+        assert client.chat.await_count == 8
+        times = [
+            float(line.split("at ")[1].rstrip("s"))
+            for line in result.splitlines()
+            if line.startswith("### Frame at")
+        ]
+        assert times[0] == 0.0
+        assert times[-1] >= 70.0, times
 
     @pytest.mark.asyncio
     async def test_analyze_video_without_frames_explains_ffmpeg(self, tmp_path: Path) -> None:
@@ -410,6 +440,22 @@ class TestGetVisionProvider:
             mock_settings.vision_provider = "none"
             with pytest.raises(ValueError, match="turned off"):
                 get_vision_provider()
+
+
+class TestScanInterval:
+    def test_short_or_unknown_duration_uses_the_base_interval(self) -> None:
+        assert scan_interval_ms(None) == OLLAMA_VIDEO_SCAN_INTERVAL_MS
+        assert scan_interval_ms(0) == OLLAMA_VIDEO_SCAN_INTERVAL_MS
+        assert scan_interval_ms(12_000) == OLLAMA_VIDEO_SCAN_INTERVAL_MS
+
+    def test_long_video_widens_the_interval_to_cover_it(self) -> None:
+        for duration in (60_001, 75_000, 3_600_000):
+            interval = scan_interval_ms(duration)
+            assert interval * OLLAMA_VIDEO_SCAN_MAX_FRAMES >= duration
+
+    @pytest.mark.asyncio
+    async def test_duration_of_a_missing_file_is_unknown(self, tmp_path: Path) -> None:
+        assert await video_duration_ms(tmp_path / "missing.webm") is None
 
 
 class TestSpread:
