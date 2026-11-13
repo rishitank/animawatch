@@ -11,18 +11,21 @@ Built with FastMCP (the ``mcp`` Python SDK):
 import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncIterator
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.server.session import ServerSession
+from mcp.server.transport_security import TransportSecuritySettings
 
 from . import billing
+from .actions import Action, InvalidActionsError, parse_actions
 from .billing import PAGE_ANALYSED
 from .browser import BrowserRecorder, URLNotAllowedError, validate_url
 from .config import settings
@@ -33,9 +36,49 @@ from .fps import FrameTimingResult, generate_fps_report
 from .metrics import extract_performance_metrics, generate_metrics_report
 from .vision import VisionProvider, get_vision_provider
 
+V = TypeVar("V")
+
 # =============================================================================
 # Application Context (Lifespan Management)
 # =============================================================================
+
+
+#: How many analyses and saved recordings the server keeps (oldest dropped first).
+MAX_STORED_ANALYSES = 200
+MAX_STORED_RECORDINGS = 20
+
+
+class BoundedStore(OrderedDict[str, V]):
+    """A dict that keeps only its newest ``limit`` entries.
+
+    A long-running server (Apify Standby) would otherwise grow without bound.
+    ``on_evict`` runs for each dropped value (used to delete recording files).
+    """
+
+    def __init__(
+        self,
+        limit: int,
+        initial: Mapping[str, V] | None = None,
+        on_evict: Callable[[V], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.limit = limit
+        self.on_evict = on_evict
+        for key, value in (initial or {}).items():
+            self[key] = value
+
+    def __setitem__(self, key: str, value: V) -> None:
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.limit:
+            _, evicted = self.popitem(last=False)
+            if self.on_evict is not None:
+                self.on_evict(evicted)
+
+
+def _delete_file(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
 
 
 @dataclass
@@ -47,6 +90,12 @@ class AppContext:
     recordings: dict[str, Path] = field(default_factory=dict)
     analyses: dict[str, str] = field(default_factory=dict)
     vision_unavailable_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.recordings = BoundedStore(
+            MAX_STORED_RECORDINGS, self.recordings, on_evict=_delete_file
+        )
+        self.analyses = BoundedStore(MAX_STORED_ANALYSES, self.analyses)
 
 
 def create_vision_provider() -> tuple[VisionProvider | None, str]:
@@ -108,6 +157,14 @@ def _require_vision(app_ctx: AppContext) -> VisionProvider:
             "get_performance_metrics work without vision."
         )
     return app_ctx.vision
+
+
+def _check_actions(actions: Sequence[Action | Mapping[str, Any]] | None) -> list[Action]:
+    """Validate the actions before any page is opened or any work is charged."""
+    try:
+        return parse_actions(actions)
+    except InvalidActionsError as err:
+        raise ToolError(str(err)) from err
 
 
 def _check_url(url: str) -> None:
@@ -293,7 +350,7 @@ def get_config() -> str:
 @mcp.tool()
 async def watch(
     url: str,
-    actions: list[dict[str, Any]] | None = None,
+    actions: list[Action] | None = None,
     wait_time: float = 3.0,
     focus: str = "all",
     save_recording: bool = False,
@@ -317,6 +374,7 @@ async def watch(
         raise RuntimeError("Context is required")
     app_ctx = ctx.request_context.lifespan_context
     _check_url(url)
+    actions = _check_actions(actions)
     async with billing.metered(PAGE_ANALYSED):
         output, result_id = await _watch_page(
             app_ctx, url, actions, wait_time, focus, save_recording, device=None
@@ -332,7 +390,7 @@ async def watch(
 async def _watch_page(
     app_ctx: AppContext,
     url: str,
-    actions: list[dict[str, Any]] | None,
+    actions: list[Action] | None,
     wait_time: float,
     focus: str,
     save_recording: bool,
@@ -462,7 +520,7 @@ async def analyze_video(
 @mcp.tool()
 async def record(
     url: str,
-    actions: list[dict[str, Any]] | None = None,
+    actions: list[Action] | None = None,
     wait_time: float = 3.0,
     output_dir: str | None = None,
     ctx: Context[ServerSession, AppContext] | None = None,
@@ -482,6 +540,7 @@ async def record(
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
     _check_url(url)
+    actions = _check_actions(actions)
 
     video_dir = Path(output_dir) if output_dir else None
     video_path = await browser.record_interaction(
@@ -580,7 +639,7 @@ async def list_devices(category: str | None = None) -> str:
 async def watch_with_device(
     url: str,
     device: str,
-    actions: list[dict[str, Any]] | None = None,
+    actions: list[Action] | None = None,
     wait_time: float = 3.0,
     focus: str = "all",
     ctx: Context[ServerSession, AppContext] | None = None,
@@ -607,6 +666,7 @@ async def watch_with_device(
 
     app_ctx = ctx.request_context.lifespan_context
     _check_url(url)
+    actions = _check_actions(actions)
     async with billing.metered(PAGE_ANALYSED):
         body, result_id = await _watch_page(
             app_ctx, url, actions, wait_time, focus, save_recording=False, device=device
@@ -656,7 +716,10 @@ async def compare_screenshots(
             raise
 
         try:
-            result = compare_images(screenshot1, screenshot2, threshold=threshold, output_diff=True)
+            # Hosted, a diff image would only pile up in a container the client cannot read.
+            result = compare_images(
+                screenshot1, screenshot2, threshold=threshold, output_diff=not settings.hosted
+            )
         finally:
             for shot in (screenshot1, screenshot2):
                 with contextlib.suppress(OSError):
@@ -690,7 +753,7 @@ async def compare_screenshots(
 @mcp.tool()
 async def analyze_fps(
     url: str,
-    actions: list[dict[str, Any]] | None = None,
+    actions: list[Action] | None = None,
     duration: float = 3.0,
     device: str | None = None,
     refresh_rate_hz: float | None = None,
@@ -722,6 +785,7 @@ async def analyze_fps(
         raise ToolError("refresh_rate_hz must be between 10 and 500")
     app_ctx = ctx.request_context.lifespan_context
     _check_url(url)
+    actions = _check_actions(actions)
     async with billing.metered(PAGE_ANALYSED):
         result = await app_ctx.browser.measure_interaction(
             url,
@@ -793,6 +857,13 @@ async def analyze_with_consensus_tool(
 
     app_ctx = ctx.request_context.lifespan_context
     browser = app_ctx.browser
+    if settings.vision_provider == "none":
+        # Consensus builds its providers directly; without this check a stored
+        # key would send the screenshot to Gemini despite vision being off.
+        raise ToolError(
+            "Vision is turned off, so no screenshot is sent to any model. "
+            "Consensus needs GEMINI_API_KEY and a running Ollama."
+        )
     _check_url(url)
     async with billing.metered(PAGE_ANALYSED):
         # Take screenshot for analysis
@@ -812,10 +883,20 @@ async def analyze_with_consensus_tool(
                 "GEMINI_API_KEY and run Ollama (OLLAMA_HOST, OLLAMA_MODEL)."
             )
 
+        both = result.gemini_result is not None and result.ollama_result is not None
+
         # Format output
         output = "## 🤝 Multi-Model Consensus Analysis\n\n"
         output += f"**URL**: {url}\n"
-        output += f"**Consensus Score**: {result.consensus_score:.0f}%\n\n"
+        if both:
+            output += f"**Consensus Score**: {result.consensus_score:.0f}%\n\n"
+        else:
+            missing = "Gemini" if result.gemini_result is None else "Ollama"
+            present = "Ollama" if missing == "Gemini" else "Gemini"
+            output += (
+                f"**{missing} did not return an analysis**, so there is no agreement to "
+                f"report. These are {present}'s findings alone.\n\n"
+            )
 
         if result.agreed_findings:
             output += "### ✅ Agreed Issues (High Confidence)\n\n"
@@ -836,7 +917,11 @@ async def analyze_with_consensus_tool(
                 output += f"- **{finding.severity.value}**: {finding.description}\n"
 
         if not result.merged_findings:
-            output += "No issues found by either model. ✨"
+            output += (
+                "No issues found by either model. ✨"
+                if both
+                else f"{'Ollama' if result.gemini_result is None else 'Gemini'} found no issues."
+            )
 
         result_id = str(uuid.uuid4())[:8]
         app_ctx.analyses[result_id] = output
@@ -852,18 +937,43 @@ async def analyze_with_consensus_tool(
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
-def configure_http(host: str, port: int) -> None:
-    """Bind the streamable-HTTP transport to ``host``:``port``.
+WILDCARD_BINDS = ("0.0.0.0", "::", "")
 
-    The SDK turns DNS-rebinding protection on (localhost Host headers only)
-    when the server object is created for localhost. It stays on for a local
-    bind; for any other bind address it is off, as the SDK itself would set it,
-    because a browser-based rebinding attack targets servers on localhost.
+
+def http_security(host: str, extra_hosts: Sequence[str]) -> TransportSecuritySettings:
+    """Host/Origin checks (DNS-rebinding protection) for the HTTP transport.
+
+    Localhost names are always allowed. A specific bind address is allowed too,
+    and so is every name in ``extra_hosts`` (``ALLOWED_HOSTS``), for example the
+    domain of a reverse proxy. Any other Host or Origin is refused.
+    """
+    names = ["127.0.0.1", "localhost", "[::1]"]
+    if host not in LOCAL_HOSTS and host not in WILDCARD_BINDS:
+        names.append(f"[{host}]" if ":" in host else host)
+    names.extend(h.strip() for h in extra_hosts if h.strip())
+    allowed_hosts = [n for name in names for n in (name, f"{name}:*")]
+    allowed_origins = [
+        f"{scheme}://{name}{port}"
+        for name in names
+        for scheme in ("http", "https")
+        for port in ("", ":*")
+    ]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
+def configure_http(host: str, port: int, extra_hosts: Sequence[str] = ()) -> None:
+    """Bind the streamable-HTTP transport to ``host``:``port``, with Host/Origin checks.
+
+    The checks stay on for every bind address: a server on 0.0.0.0 is still
+    reachable as localhost, which is what a DNS-rebinding page targets.
     """
     mcp.settings.host = host
     mcp.settings.port = port
-    if host not in LOCAL_HOSTS:
-        mcp.settings.transport_security = None
+    mcp.settings.transport_security = http_security(host, extra_hosts)
 
 
 def main() -> None:
@@ -874,7 +984,7 @@ def main() -> None:
     transport: Literal["stdio", "streamable-http"] = "stdio"
     if "--http" in sys.argv:
         transport = "streamable-http"
-        configure_http(settings.server_host, settings.server_port)
+        configure_http(settings.server_host, settings.server_port, settings.allowed_hosts_list)
 
     mcp.run(transport=transport)
 
