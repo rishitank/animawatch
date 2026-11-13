@@ -15,6 +15,8 @@ import contextlib
 import json
 import math
 import mimetypes
+import shutil
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -555,12 +557,26 @@ class OllamaProvider(VisionProvider):
         last, are analysed one after another. Motion between frames is not
         visible to the model.
         """
-        extraction = await extract_frames(
-            video_path,
-            interval_ms=scan_interval_ms(await video_duration_ms(video_path)),
-            max_frames=OLLAMA_VIDEO_SCAN_MAX_FRAMES,
+        duration_ms = await video_duration_ms(video_path)
+        coverage = (
+            ""
+            if duration_ms
+            else (
+                "ffprobe could not read the video's length, so frames were sampled from at "
+                "most its first "
+                f"{OLLAMA_VIDEO_SCAN_INTERVAL_MS * OLLAMA_VIDEO_SCAN_MAX_FRAMES / 1000:.0f} s."
+            )
         )
+        # The similarity filter drops candidates from the result but not from disk,
+        # so every candidate goes in a directory owned (and removed) here.
+        work_dir = Path(tempfile.mkdtemp(prefix="animawatch_frames_"))
         try:
+            extraction = await extract_frames(
+                video_path,
+                interval_ms=scan_interval_ms(duration_ms),
+                max_frames=OLLAMA_VIDEO_SCAN_MAX_FRAMES,
+                output_dir=work_dir,
+            )
             if not extraction.frames:
                 raise RuntimeError(
                     "Could not extract frames from the video for Ollama: install ffmpeg "
@@ -574,8 +590,9 @@ class OllamaProvider(VisionProvider):
                     f"screen recording.\n\n{prompt}"
                 )
                 results.append(await self.analyze_image(frame.path, frame_prompt, structured))
-        finally:
             await cleanup_frames(extraction)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
         if structured:
             parsed = [r for r in results if isinstance(r, AnalysisResult)]
@@ -592,7 +609,7 @@ class OllamaProvider(VisionProvider):
                 id=str(uuid.uuid4())[:8],
                 success=True,
                 findings=findings,
-                summary=" ".join(r.summary for r in parsed),
+                summary=" ".join([coverage, *(r.summary for r in parsed)]).strip(),
                 overall_score=min((r.overall_score for r in parsed), default=100),
                 metadata=AnalysisMetadata(
                     provider="ollama",
@@ -605,6 +622,8 @@ class OllamaProvider(VisionProvider):
             + (r if isinstance(r, str) else r.to_markdown())
             for frame, r in zip(sampled, results, strict=True)
         ]
+        if coverage:
+            sections.insert(0, f"_{coverage}_")
         return "\n\n".join(sections)
 
     @with_retry(VISION_RETRY_CONFIG)
