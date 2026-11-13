@@ -15,6 +15,7 @@ import contextlib
 import math
 import os
 import tempfile
+import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -26,10 +27,13 @@ from playwright.async_api import (
     Browser,
     BrowserContext,
     CDPSession,
+    Frame,
     Page,
     Playwright,
+    Request,
     async_playwright,
 )
+from playwright.async_api import Error as PlaywrightError
 
 from .actions import (
     Action,
@@ -45,7 +49,6 @@ from .devices import DeviceProfile, get_device
 from .fps import (
     CALIBRATION_JS,
     DEFAULT_REFRESH_INTERVAL_MS,
-    FRAME_AUTOSTART_JS,
     FRAME_COLLECTOR_JS,
     TRACE_CATEGORIES,
     CompositorFrameStats,
@@ -63,6 +66,9 @@ from .logging import log_extra
 CALIBRATION_FRAMES = 30
 #: How long to wait for Chromium to hand over a finished trace.
 TRACE_TIMEOUT_SECONDS = 10.0
+#: After a navigation, measurement restarts once no request has been in flight
+#: for this long: the rule Playwright's "networkidle" uses.
+NETWORK_QUIET_SECONDS = 0.5
 
 
 class URLNotAllowedError(ValueError):
@@ -137,6 +143,79 @@ class _CompositorTrace:
         with contextlib.suppress(Exception):
             await self._session.detach()
         return parse_compositor_trace(self._events)
+
+
+class _NavigationRearm:
+    """Restarts measurement in a document that replaced the measured one.
+
+    A click or a script can navigate during the measurement window. The new
+    document gets the collector from the context's init script, but it is not
+    measuring. Playwright reports every request the page makes, so the requests
+    in flight are known exactly. After a main-frame navigation, this waits for
+    the ``load`` event and then for ``NETWORK_QUIET_SECONDS`` with no request in
+    flight, and only then starts measuring. The new page's load work is
+    therefore excluded, as it is for the first page.
+    """
+
+    def __init__(self, page: Page) -> None:
+        self._page = page
+        self._in_flight: set[Request] = set()
+        self._last_activity = time.monotonic()
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+        page.on("request", self._on_request)
+        page.on("requestfinished", self._on_request_done)
+        page.on("requestfailed", self._on_request_done)
+        page.on("framenavigated", self._on_navigated)
+
+    def _on_request(self, request: Request) -> None:
+        self._in_flight.add(request)
+        self._last_activity = time.monotonic()
+
+    def _on_request_done(self, request: Request) -> None:
+        self._in_flight.discard(request)
+        self._last_activity = time.monotonic()
+
+    def _on_navigated(self, frame: Frame) -> None:
+        # Also fires for same-document navigations (pushState, #hash); restart()
+        # is then a no-op, because the collector is still running.
+        if frame != self._page.main_frame:
+            return
+        if self._task is not None:
+            self._task.cancel()
+        self._task = asyncio.get_running_loop().create_task(self._restart_when_idle())
+
+    def _network_quiet(self) -> bool:
+        return (
+            not self._in_flight and time.monotonic() - self._last_activity >= NETWORK_QUIET_SECONDS
+        )
+
+    async def _restart_when_idle(self) -> None:
+        try:
+            await self._page.wait_for_load_state("load")
+            while not self._network_quiet():
+                await asyncio.sleep(0.05)
+            await self._page.evaluate(
+                "() => window.__animawatchFrames && window.__animawatchFrames.restart()"
+            )
+        except PlaywrightError as err:
+            # Another navigation replaced this document; its own task takes over.
+            log_extra("Measurement restart skipped", error=str(err))
+
+    async def close(self) -> None:
+        """Stop waiting for a restart; the window has ended. Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+        self._page.remove_listener("request", self._on_request)
+        self._page.remove_listener("requestfinished", self._on_request_done)
+        self._page.remove_listener("requestfailed", self._on_request_done)
+        self._page.remove_listener("framenavigated", self._on_navigated)
+        if self._task is not None and not self._task.done():
+            # Still waiting: the new page never went quiet within the window.
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
 
 
 class BrowserRecorder:
@@ -366,6 +445,7 @@ class BrowserRecorder:
         context = await browser.new_context(**options)
         video_path: Path | None = None
         timing: FrameTimingResult | None = None
+        rearm: _NavigationRearm | None = None
         try:
             if measure_frames:
                 await context.add_init_script(FRAME_COLLECTOR_JS)
@@ -392,8 +472,8 @@ class BrowserRecorder:
                 started_origin = await page.evaluate(
                     "() => { window.__animawatchFrames.start(); return performance.timeOrigin; }"
                 )
-                # A navigation during the actions re-arms measurement in the new document.
-                await context.add_init_script(FRAME_AUTOSTART_JS)
+                # A navigation during the window restarts measurement in the new document.
+                rearm = _NavigationRearm(page)
 
             for step in steps:
                 await self._perform_action(page, step)
@@ -401,6 +481,8 @@ class BrowserRecorder:
             await asyncio.sleep(wait)
 
             if measure_frames:
+                if rearm is not None:
+                    await rearm.close()
                 raw = await page.evaluate(
                     "() => window.__animawatchFrames ? window.__animawatchFrames.stop() : null"
                 )
@@ -417,6 +499,8 @@ class BrowserRecorder:
             if record_video and page.video:
                 video_path = Path(await page.video.path())
         finally:
+            if rearm is not None:
+                await rearm.close()
             # Closing the context finalises the video file.
             await context.close()
 
@@ -546,14 +630,29 @@ def _build_timing(
     timestamps = [float(t) for t in raw.get("timestamps", [])]
 
     origin = raw.get("timeOrigin")
-    if (
+    navigated = (
         origin is not None
         and started_origin is not None
         and abs(float(origin) - float(started_origin)) > 0.5
-    ):
+    )
+    if navigated:
         notes.append(
             "The page navigated during measurement: only frames of the last document are counted."
         )
+        if raw.get("startedAt") is None:
+            notes.append(
+                "The new page's network did not go quiet "
+                f"({NETWORK_QUIET_SECONDS * 1000:.0f} ms with no request in flight) before the "
+                "window ended, so it was not measured. Measure that URL directly."
+            )
+        if compositor is not None:
+            # The trace covers the whole window: the first page, the navigation and
+            # the new page's load. It cannot be cut to the last document's window.
+            compositor = None
+            notes.append(
+                "The compositor trace was left out because it spans the navigation and "
+                "the new page's load, so it does not match the window measured above."
+            )
     if raw.get("overflow"):
         notes.append("The collector's buffer filled; the end of the window was not recorded.")
     if raw.get("visibility") == "hidden":
@@ -561,7 +660,8 @@ def _build_timing(
     if raw.get("armedAfterNavigation"):
         notes.append(
             "After the navigation, measurement restarted once the new page had loaded and "
-            "its network had been quiet for 500 ms, so its load work is not counted."
+            f"no request had been in flight for {NETWORK_QUIET_SECONDS * 1000:.0f} ms, "
+            "so its load work is not counted."
         )
 
     if interval is None:
