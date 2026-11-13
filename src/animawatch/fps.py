@@ -43,8 +43,8 @@ from typing import Any, Literal
 #: load work is not counted.
 _COLLECTOR_BODY = r"""
   if (!window.__animawatchFrames) {
-    const MAX_FRAMES = 20000;
-    const MAX_LOAF = 500;
+    const MAX_FRAMES = __MAX_FRAMES__;
+    const MAX_LOAF = __MAX_LOAF__;
     const state = {
       running: false,
       timestamps: [],
@@ -52,18 +52,19 @@ _COLLECTOR_BODY = r"""
       loafSupported: false,
       startedAt: null,
       armedAfterNavigation: false,
-      overflow: false,
+      framesOverflow: false,
+      loafOverflow: false,
     };
     let observer = null;
     const tick = (ts) => {
       if (!state.running) { return; }
       if (state.timestamps.length < MAX_FRAMES) { state.timestamps.push(ts); }
-      else { state.overflow = true; }
+      else { state.framesOverflow = true; }
       requestAnimationFrame(tick);
     };
     const record = (entries) => {
       for (const e of entries) {
-        if (state.loaf.length >= MAX_LOAF) { state.overflow = true; continue; }
+        if (state.loaf.length >= MAX_LOAF) { state.loafOverflow = true; continue; }
         state.loaf.push({
           startTime: e.startTime,
           duration: e.duration,
@@ -90,7 +91,7 @@ _COLLECTOR_BODY = r"""
     const start = () => {
       if (state.running) { return; }
       state.timestamps = [];
-      state.overflow = false;
+      state.framesOverflow = false;
       state.startedAt = performance.now();
       state.running = true;
       requestAnimationFrame(tick);
@@ -120,7 +121,8 @@ _COLLECTOR_BODY = r"""
             stoppedAt: performance.now(),
             timeOrigin: performance.timeOrigin,
             armedAfterNavigation: state.armedAfterNavigation,
-            overflow: state.overflow,
+            framesOverflow: state.framesOverflow,
+            loafOverflow: state.loafOverflow,
             visibility: document.visibilityState,
           };
         },
@@ -128,6 +130,14 @@ _COLLECTOR_BODY = r"""
     });
   }
 """
+
+#: The collector keeps at most this many frame timestamps (over 2.5 minutes at
+#: 120 Hz) and this many long animation frames.
+FRAME_BUFFER_LIMIT = 20000
+LOAF_BUFFER_LIMIT = 500
+_COLLECTOR_BODY = _COLLECTOR_BODY.replace("__MAX_FRAMES__", str(FRAME_BUFFER_LIMIT)).replace(
+    "__MAX_LOAF__", str(LOAF_BUFFER_LIMIT)
+)
 
 #: Installed with ``BrowserContext.add_init_script`` before the page loads, so
 #: every document in the context, including one reached by navigating, has it.
