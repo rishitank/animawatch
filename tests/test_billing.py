@@ -22,6 +22,13 @@ class FakeMeter:
         self.charged.append((event, count))
 
 
+async def metered_call(fail_with: Exception | None = None) -> None:
+    """One metered unit of work that succeeds, or fails with ``fail_with``."""
+    async with billing.metered(billing.PAGE_ANALYSED):
+        if fail_with is not None:
+            raise fail_with
+
+
 @pytest.fixture(autouse=True)
 def restore_meter() -> Iterator[None]:
     yield
@@ -74,8 +81,7 @@ async def test_metered_charges_only_on_success() -> None:
     assert meter.charged == [("page-analysed", 2)]
 
     with pytest.raises(RuntimeError):
-        async with billing.metered(billing.PAGE_ANALYSED):
-            raise RuntimeError("page failed to load")
+        await metered_call(RuntimeError("page failed to load"))
     assert meter.charged == [("page-analysed", 2)]
 
 
@@ -94,8 +100,7 @@ async def test_concurrent_calls_cannot_both_take_the_last_event() -> None:
     task = asyncio.create_task(first())
     await started.wait()
     with pytest.raises(ToolError, match="allows 0 more"):
-        async with billing.metered(billing.PAGE_ANALYSED):
-            pass
+        await metered_call()
     release.set()
     await task
 
@@ -104,8 +109,54 @@ async def test_failed_call_releases_its_reservation() -> None:
     meter = FakeMeter(remaining=1)
     billing.set_meter(meter)
     with pytest.raises(ValueError):
-        async with billing.metered(billing.PAGE_ANALYSED):
-            raise ValueError("boom")
-    async with billing.metered(billing.PAGE_ANALYSED):
-        pass
+        await metered_call(ValueError("boom"))
+    await metered_call()
     assert meter.charged == [("page-analysed", 1)]
+
+
+async def test_failed_charge_still_returns_the_result() -> None:
+    class FailingMeter(FakeMeter):
+        async def charge(self, event: str, count: int) -> None:
+            raise ConnectionError("Apify API unavailable")
+
+    billing.set_meter(FailingMeter(remaining=5))
+    finished = False
+    async with billing.metered(billing.PAGE_ANALYSED):
+        finished = True
+    assert finished  # no exception escaped the context manager
+    # The reservation was released, so the full allowance is available again.
+    await billing.ensure_can_charge(billing.PAGE_ANALYSED, 5)
+
+
+async def test_cancelled_calls_release_their_reservations() -> None:
+    import asyncio
+
+    class SlowMeter(FakeMeter):
+        async def charge(self, event: str, count: int) -> None:
+            await asyncio.sleep(10)
+
+    billing.set_meter(SlowMeter(remaining=1))
+    work_started = asyncio.Event()
+
+    async def cancelled_during_work() -> None:
+        async with billing.metered(billing.PAGE_ANALYSED):
+            work_started.set()
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(cancelled_during_work())
+    await work_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async def cancelled_while_charging() -> None:
+        await metered_call()
+
+    task = asyncio.create_task(cancelled_while_charging())
+    await asyncio.sleep(0.01)  # now inside the slow charge
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Neither cancelled call left its reservation behind.
+    await billing.ensure_can_charge(billing.PAGE_ANALYSED, 1)

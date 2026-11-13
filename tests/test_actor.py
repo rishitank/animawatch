@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from animawatch import actor
 from animawatch.config import DEFAULT_GEMINI_MODEL, settings
@@ -43,6 +44,7 @@ class TestApplyActorInput:
         assert settings.vision_provider == "gemini"
         assert settings.vision_model == "gemini-x"
         assert settings.allow_file_urls is False
+        assert settings.hosted is True
         assert settings.browser_headless is True
 
     def test_no_key_turns_vision_off(self, restore_settings: None) -> None:
@@ -56,15 +58,36 @@ class TestApplyActorInput:
         actor.apply_actor_input({})
         assert settings.vision_provider == "gemini"
 
-    def test_vision_can_be_disabled_with_a_key(self, restore_settings: None) -> None:
+    def test_vision_off_drops_the_key(self, restore_settings: None) -> None:
         actor.apply_actor_input({"geminiApiKey": "k", "visionEnabled": False})
         assert settings.vision_provider == "none"
+        assert settings.gemini_api_key == ""  # nothing can reach Gemini
 
-    @pytest.mark.parametrize(("value", "expected"), [(10, 10), (0, 30), (500, 30), (True, 30)])
-    def test_max_wait_bounds(self, restore_settings: None, value: object, expected: int) -> None:
+    def test_max_wait_is_applied(self, restore_settings: None) -> None:
+        actor.apply_actor_input({"maxWaitSeconds": 10})
+        assert settings.max_recording_duration == 10
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"maxWaitSeconds": 0},
+            {"maxWaitSeconds": 500},
+            {"maxWaitSeconds": True},
+            {"maxWaitSeconds": "10"},
+            {"geminiApiKey": 123},
+            {"visionModel": ""},
+            {"visionEnabled": "yes"},
+        ],
+    )
+    def test_invalid_input_is_rejected_before_any_change(
+        self, restore_settings: None, bad: dict[str, object]
+    ) -> None:
         settings.max_recording_duration = 30
-        actor.apply_actor_input({"maxWaitSeconds": value})
-        assert settings.max_recording_duration == expected
+        settings.allow_file_urls = True
+        with pytest.raises(ValidationError):
+            actor.apply_actor_input(bad)
+        assert settings.max_recording_duration == 30
+        assert settings.allow_file_urls is True
 
 
 class TestReadinessProbe:
@@ -100,20 +123,26 @@ class TestReadinessProbe:
         assert await self._call("/mcp", []) == [{"reached": "/mcp"}]
 
 
+class FakeChargingManager:
+    """The part of apify's ChargingManager that ApifyMeter uses."""
+
+    def __init__(self, remaining: int | None) -> None:
+        self.remaining = remaining
+        self.asked: list[str] = []
+
+    def calculate_max_event_charge_count_within_limit(self, event_name: str) -> int | None:
+        self.asked.append(event_name)
+        return self.remaining
+
+
 class TestApifyMeter:
     class FakeActor:
         def __init__(self, remaining: int | None) -> None:
-            self.remaining_value = remaining
+            self.manager = FakeChargingManager(remaining)
             self.charges: list[tuple[str, int]] = []
 
-        def get_charging_manager(self) -> Any:
-            outer = self
-
-            class Manager:
-                def calculate_max_event_charge_count_within_limit(self, event: str) -> int | None:
-                    return outer.remaining_value
-
-            return Manager()
+        def get_charging_manager(self) -> FakeChargingManager:
+            return self.manager
 
         async def charge(self, event_name: str, count: int) -> None:
             self.charges.append((event_name, count))
@@ -122,6 +151,7 @@ class TestApifyMeter:
         fake = self.FakeActor(remaining=3)
         meter = actor.ApifyMeter(fake)
         assert await meter.remaining("page-analysed") == 3
+        assert fake.manager.asked == ["page-analysed"]
         await meter.charge("page-analysed", 2)
         assert fake.charges == [("page-analysed", 2)]
 
@@ -130,22 +160,23 @@ class TestApifyMeter:
 
 
 class TestHostedServer:
-    def test_local_file_tools_removed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_local_file_tools_removed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from animawatch import server
 
-        saved_tools = dict(server.mcp._tool_manager._tools)
-        monkeypatch.setattr(server.mcp.settings, "transport_security", None)
+        for name in ("transport_security", "streamable_http_path", "session_idle_timeout"):
+            monkeypatch.setattr(server.mcp.settings, name, getattr(server.mcp.settings, name))
         try:
             actor.configure_hosted_server()
             actor.configure_hosted_server()  # idempotent
-            names = {t.name for t in server.mcp._tool_manager.list_tools()}
-            assert "analyze_video" not in names
-            assert "record" not in names
+            names = {t.name for t in await server.mcp.list_tools()}
+            assert names.isdisjoint(actor.HOSTED_DISABLED_TOOLS)
             assert {"watch", "analyze_fps", "screenshot"} <= names
             assert server.mcp.settings.streamable_http_path == "/mcp"
         finally:
-            server.mcp._tool_manager._tools.clear()
-            server.mcp._tool_manager._tools.update(saved_tools)
+            # Put the tools back through the public API for the other tests.
+            for tool in (server.analyze_video, server.record, server.analyze_with_consensus_tool):
+                server.mcp.add_tool(tool)
+        assert set(actor.HOSTED_DISABLED_TOOLS) <= {t.name for t in await server.mcp.list_tools()}
 
     def test_port(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class Config:
@@ -233,10 +264,16 @@ async def test_actor_end_to_end(tmp_path: Path, page_server: str) -> None:
                 if probe.status_code == 200:
                     break
             except httpx.HTTPError:
-                pass
+                pass  # not listening yet: retry until the deadline
             if proc.poll() is not None or time.monotonic() > deadline:
-                output = proc.stdout.read().decode() if proc.stdout else ""
-                pytest.fail(f"Actor did not become ready:\n{output}")
+                # Stop the child first: reading its pipe while it runs would block.
+                proc.terminate()
+                try:
+                    output, _ = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    output, _ = proc.communicate(timeout=10)
+                pytest.fail(f"Actor did not become ready:\n{output.decode(errors='replace')}")
             time.sleep(0.5)
         assert probe.text == "ok"
 
