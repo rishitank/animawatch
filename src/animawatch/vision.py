@@ -19,7 +19,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, TypeVar
 
 import aiofiles
 from google import genai
@@ -32,12 +32,27 @@ from .logging import log_extra, timed_operation
 from .models import AnalysisMetadata, AnalysisResult, Finding, IssueCategory, Severity
 from .retry import RetryConfig, vision_circuit, with_retry
 
+T = TypeVar("T")
+
 # Maximum time to wait for video processing (5 minutes)
 MAX_PROCESSING_SECONDS = 300
 
-# Frames sampled from a video for Ollama, which takes images only
-OLLAMA_VIDEO_FRAME_INTERVAL_MS = 500
+# Frames sampled from a video for Ollama, which takes images only: candidates
+# every 250 ms (up to 60 s of video), then at most 8 spread over the whole of it
+OLLAMA_VIDEO_SCAN_INTERVAL_MS = 250
+OLLAMA_VIDEO_SCAN_MAX_FRAMES = 240
 OLLAMA_VIDEO_MAX_FRAMES = 8
+
+
+def spread(items: list[T], count: int) -> list[T]:
+    """Up to ``count`` items evenly spaced across ``items``, first and last included."""
+    if len(items) <= count:
+        return list(items)
+    if count <= 1:
+        return items[:count]
+    step = (len(items) - 1) / (count - 1)
+    return [items[round(i * step)] for i in range(count)]
+
 
 # Retry configuration for vision API calls
 VISION_RETRY_CONFIG = RetryConfig(
@@ -518,18 +533,18 @@ class OllamaProvider(VisionProvider):
     async def analyze_video(
         self, video_path: Path, prompt: str, structured: bool = False
     ) -> str | AnalysisResult:
-        """Analyze a video by sampling frames and analysing each one.
+        """Analyze a video by sampling frames across all of it and analysing each one.
 
-        Ollama's vision models take images, not video, so up to
-        ``OLLAMA_VIDEO_MAX_FRAMES`` frames are taken every
-        ``OLLAMA_VIDEO_FRAME_INTERVAL_MS`` (skipping identical ones) with ffmpeg
-        and analysed one after another. Motion between frames is not visible to
-        the model.
+        Ollama's vision models take images, not video. Candidate frames are taken
+        with ffmpeg every ``OLLAMA_VIDEO_SCAN_INTERVAL_MS`` (identical ones
+        skipped), then ``OLLAMA_VIDEO_MAX_FRAMES`` of them, spread from the first
+        to the last, are analysed one after another. Motion between frames is not
+        visible to the model.
         """
         extraction = await extract_frames(
             video_path,
-            interval_ms=OLLAMA_VIDEO_FRAME_INTERVAL_MS,
-            max_frames=OLLAMA_VIDEO_MAX_FRAMES,
+            interval_ms=OLLAMA_VIDEO_SCAN_INTERVAL_MS,
+            max_frames=OLLAMA_VIDEO_SCAN_MAX_FRAMES,
         )
         try:
             if not extraction.frames:
@@ -537,8 +552,9 @@ class OllamaProvider(VisionProvider):
                     "Could not extract frames from the video for Ollama: install ffmpeg "
                     "and make sure it is on PATH."
                 )
+            sampled = spread(extraction.frames, OLLAMA_VIDEO_MAX_FRAMES)
             results: list[str | AnalysisResult] = []
-            for frame in extraction.frames:
+            for frame in sampled:
                 frame_prompt = (
                     f"This is a still frame taken {frame.timestamp_ms / 1000:.1f}s into a "
                     f"screen recording.\n\n{prompt}"
@@ -549,7 +565,15 @@ class OllamaProvider(VisionProvider):
 
         if structured:
             parsed = [r for r in results if isinstance(r, AnalysisResult)]
-            findings = [f for r in parsed for f in r.findings]
+            # A finding without its own timestamp happened in the frame it came from.
+            findings = [
+                f
+                if f.timestamp is not None
+                else f.model_copy(update={"timestamp": frame.timestamp_ms / 1000})
+                for frame, r in zip(sampled, results, strict=True)
+                if isinstance(r, AnalysisResult)
+                for f in r.findings
+            ]
             return AnalysisResult(
                 id=str(uuid.uuid4())[:8],
                 success=True,
@@ -565,7 +589,7 @@ class OllamaProvider(VisionProvider):
         sections = [
             f"### Frame at {frame.timestamp_ms / 1000:.1f}s\n\n"
             + (r if isinstance(r, str) else r.to_markdown())
-            for frame, r in zip(extraction.frames, results, strict=True)
+            for frame, r in zip(sampled, results, strict=True)
         ]
         return "\n\n".join(sections)
 
