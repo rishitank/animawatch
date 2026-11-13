@@ -11,5 +11,5 @@ Features:
 - Multiple AI providers (Gemini, Ollama)
 """
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 __all__ = ["server", "browser", "vision", "config", "logging", "retry"]

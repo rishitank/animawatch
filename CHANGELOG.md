@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/rishitank/animawatch/compare/v0.3.1...v0.4.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* measure frame timing in the page; current Gemini default; Apify Standby Actor ([#69](https://github.com/rishitank/animawatch/issues/69))
+
+### 🚀 Features
+
+* measure frame timing in the page; current Gemini default; Apify Standby Actor ([#69](https://github.com/rishitank/animawatch/issues/69)) ([7759bc8](https://github.com/rishitank/animawatch/commit/7759bc8c1702ed0f02318c1957ee75823f5f16d1))
+
+
+### 🐛 Bug Fixes
+
+* **deps:** update dependency aiofiles to &gt;=25.1.0 ([#54](https://github.com/rishitank/animawatch/issues/54)) ([4ec0676](https://github.com/rishitank/animawatch/commit/4ec0676ad76d6c108c867de6de2803abb15a8b18))
+* **deps:** update dependency httpx to &gt;=0.28.1 ([#55](https://github.com/rishitank/animawatch/issues/55)) ([23dc0d9](https://github.com/rishitank/animawatch/commit/23dc0d962e8ecaeab1362073b4912ff8a5349431))
+* **deps:** update dependency mcp to &gt;=1.30.0,&lt;2 ([#56](https://github.com/rishitank/animawatch/issues/56)) ([072fc82](https://github.com/rishitank/animawatch/commit/072fc82cd305e5e838e0dfa86dd08c088bcdd034))
+
+
+### 🔧 CI/CD
+
+* add shared security scan and actionlint ([#48](https://github.com/rishitank/animawatch/issues/48)) ([11d5ef1](https://github.com/rishitank/animawatch/commit/11d5ef110ad227279d2c241e45eb050a01edec89))
+
 ## [0.3.1](https://github.com/rishitank/animawatch/compare/v0.3.0...v0.3.1) (2026-02-06)
 
 
