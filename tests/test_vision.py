@@ -1,11 +1,15 @@
 """Tests for AnimaWatch vision AI providers."""
 
+import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from animawatch.cache import AnalysisCache, analysis_cache
+from animawatch.frames import ExtractedFrame, FrameExtractionResult
+from animawatch.models import AnalysisResult
 from animawatch.retry import vision_circuit
 from animawatch.vision import GeminiProvider, OllamaProvider, get_vision_provider
 
@@ -25,7 +29,7 @@ class TestGeminiProvider:
         """Test that GeminiProvider raises without API key."""
         with patch("animawatch.vision.settings") as mock_settings:
             mock_settings.gemini_api_key = ""
-            with pytest.raises(ValueError, match="GEMINI_API_KEY not set"):
+            with pytest.raises(ValueError, match="GEMINI_API_KEY is not set"):
                 GeminiProvider()
 
     def test_init_with_api_key_creates_client(self) -> None:
@@ -35,7 +39,7 @@ class TestGeminiProvider:
             patch("animawatch.vision.genai"),
         ):
             mock_settings.gemini_api_key = "test-api-key"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
 
             provider = GeminiProvider()
 
@@ -55,7 +59,7 @@ class TestGeminiProvider:
             patch("animawatch.vision.genai") as mock_genai,
         ):
             mock_settings.gemini_api_key = "test-api-key"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
 
             # Mock video file states
             mock_video_file = MagicMock()
@@ -95,7 +99,7 @@ class TestGeminiProvider:
             patch("animawatch.vision.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
         ):
             mock_settings.gemini_api_key = "test-api-key"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
 
             # First call returns PROCESSING, second returns ACTIVE
             processing_file = MagicMock()
@@ -137,7 +141,7 @@ class TestGeminiProvider:
             patch("animawatch.vision.genai") as mock_genai,
         ):
             mock_settings.gemini_api_key = "test-api-key"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
 
             failed_file = MagicMock()
             failed_file.state.name = "FAILED"
@@ -164,7 +168,7 @@ class TestGeminiProvider:
             patch("animawatch.vision.genai") as mock_genai,
         ):
             mock_settings.gemini_api_key = "test-api-key"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
 
             mock_response = MagicMock()
             mock_response.text = "Image analysis"
@@ -190,7 +194,7 @@ class TestGeminiProvider:
             patch("animawatch.vision.genai") as mock_genai,
         ):
             mock_settings.gemini_api_key = "test-api-key"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
 
             mock_response = MagicMock()
             mock_response.text = None  # Empty/blank response
@@ -237,19 +241,84 @@ class TestOllamaProvider:
             # This test verifies settings are properly configured
             # The actual initialization is tested via the factory function
 
-    @pytest.mark.asyncio
-    async def test_analyze_video_raises_not_implemented(self) -> None:
-        """Test that analyze_video raises NotImplementedError for Ollama."""
-        mock_client = MagicMock()
-
-        # Create provider directly without full initialization
+    @staticmethod
+    def _provider(client: Any) -> OllamaProvider:
         provider = OllamaProvider.__new__(OllamaProvider)
-        provider.client = mock_client
+        provider.client = client
         provider.model = "qwen2.5-vl:7b"
         provider._cache = AnalysisCache()
+        return provider
 
-        with pytest.raises(NotImplementedError, match="Ollama doesn't support direct video"):
-            await provider.analyze_video(Path("/tmp/test.webm"), "Analyze")
+    @pytest.mark.asyncio
+    async def test_analyze_video_samples_frames(self, tmp_path: Path) -> None:
+        """Ollama takes images only: a real video is split into frames, each analysed."""
+        video = tmp_path / "clip.webm"
+        made = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=2:size=160x120:rate=25",
+                "-c:v",
+                "libvpx",
+                "-y",
+                str(video),
+            ],
+            check=False,
+        )
+        assert made.returncode == 0, "ffmpeg is needed for this test"
+
+        client = AsyncMock()
+        client.chat.return_value = {"message": {"content": "frame looks fine"}}
+        result = await self._provider(client).analyze_video(video, "Analyze")
+
+        assert isinstance(result, str)
+        assert client.chat.await_count >= 2
+        assert "### Frame at 0.0s" in result
+        assert "### Frame at 0.5s" in result
+        prompt = client.chat.call_args_list[0].kwargs["messages"][0]["content"]
+        assert "still frame" in prompt
+        assert "Analyze" in prompt
+
+    @pytest.mark.asyncio
+    async def test_analyze_video_without_frames_explains_ffmpeg(self, tmp_path: Path) -> None:
+        empty = FrameExtractionResult(frames=[], total_frames=0, duration_ms=0, fps=2.0)
+        with (
+            patch("animawatch.vision.extract_frames", AsyncMock(return_value=empty)),
+            pytest.raises(RuntimeError, match="ffmpeg"),
+        ):
+            await self._provider(AsyncMock()).analyze_video(tmp_path / "x.webm", "Analyze")
+
+    @pytest.mark.asyncio
+    async def test_analyze_video_structured_merges_findings(self, tmp_path: Path) -> None:
+        frames = []
+        for i in range(2):
+            path = tmp_path / f"frame_{i}.png"
+            path.write_bytes(f"img{i}".encode())
+            frames.append(
+                ExtractedFrame(path=path, timestamp_ms=i * 500, frame_number=i, content_hash=str(i))
+            )
+        extraction = FrameExtractionResult(frames=frames, total_frames=2, duration_ms=500, fps=2.0)
+        finding = (
+            '{"findings": [{"id": "f", "category": "layout", "severity": "major", '
+            '"confidence": 80, "element": "nav", "description": "overlap", '
+            '"suggestion": "fix"}], "summary": "s", "overall_score": 70}'
+        )
+        client = AsyncMock()
+        client.chat.return_value = {"message": {"content": finding}}
+        with patch("animawatch.vision.extract_frames", AsyncMock(return_value=extraction)):
+            result = await self._provider(client).analyze_video(
+                tmp_path / "x.webm", "Analyze", structured=True
+            )
+
+        assert isinstance(result, AnalysisResult)
+        assert len(result.findings) == 2
+        assert result.overall_score == 70
+        assert result.metadata.provider == "ollama"
+        assert not frames[0].path.exists()  # frames are cleaned up
 
     @pytest.mark.asyncio
     async def test_analyze_image_calls_ollama_chat(self, tmp_path: Path) -> None:
@@ -285,7 +354,7 @@ class TestGetVisionProvider:
         ):
             mock_settings.vision_provider = "gemini"
             mock_settings.gemini_api_key = "test-key"
-            mock_settings.vision_model = "gemini-2.0-flash"
+            mock_settings.vision_model = "gemini-3.8-flash"
 
             provider = get_vision_provider()
 
@@ -308,3 +377,10 @@ class TestGetVisionProvider:
 
             # Check class name due to module reloading during mocking
             assert type(provider).__name__ == "OllamaProvider"
+
+    def test_none_turns_vision_off(self) -> None:
+        """VISION_PROVIDER=none is refused by the factory, so callers run without vision."""
+        with patch("animawatch.vision.settings") as mock_settings:
+            mock_settings.vision_provider = "none"
+            with pytest.raises(ValueError, match="turned off"):
+                get_vision_provider()
