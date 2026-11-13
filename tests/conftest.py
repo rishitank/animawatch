@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -56,6 +57,24 @@ NAVIGATES = """<!doctype html>
 <body><a id="go" href="/smooth.html">next</a></body></html>
 """
 
+#: A page whose link navigates to LOADS_LATE.
+NAVIGATES_TO_LATE_LOADER = NAVIGATES.replace("/smooth.html", "/loads-late.html")
+
+#: A smooth CSS animation whose page keeps loading after its load event: it
+#: fetches /slow (answered after SLOW_RESPONSE_SECONDS) and then renders for
+#: 300 ms on the main thread. That is load work, and must not be measured.
+LOADS_LATE = SMOOTH_CSS.replace(
+    "</body>",
+    """<script>
+  addEventListener('load', () => fetch('/slow').then((r) => r.text()).then(() => {
+    const start = performance.now();
+    while (performance.now() - start < 300) { /* render the data */ }
+  }));
+</script></body>""",
+)
+
+SLOW_RESPONSE_SECONDS = 1.2
+
 
 #: Large text (an LCP candidate), then a block inserted after 1 s that pushes
 #: the paragraph down: a layout shift outside the 500 ms recent-input window.
@@ -72,6 +91,18 @@ class _QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         return
 
+    def do_GET(self) -> None:
+        if self.path == "/slow":
+            time.sleep(SLOW_RESPONSE_SECONDS)
+            body = b"data"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
 
 @pytest.fixture(scope="session")
 def page_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
@@ -82,6 +113,8 @@ def page_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     (root / "blocked-css.html").write_text(BLOCKED_WITH_CSS_ANIMATION)
     (root / "blocker.js").write_text(BLOCKER_JS)
     (root / "navigates.html").write_text(NAVIGATES)
+    (root / "navigates-late.html").write_text(NAVIGATES_TO_LATE_LOADER)
+    (root / "loads-late.html").write_text(LOADS_LATE)
     (root / "shift.html").write_text(LAYOUT_SHIFT)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(_QuietHandler, directory=str(root)))

@@ -113,6 +113,34 @@ async def test_navigation_during_measurement_is_reported(
     assert result.timing.jank_percentage < 2.0, result.timing
 
 
+async def test_navigation_restart_waits_for_in_flight_requests(
+    chromium: BrowserRecorder, page_server: str
+) -> None:
+    """The new page fetches data after its load event and then renders for 300 ms.
+
+    Resource Timing lists only finished requests, so an in-page "network quiet"
+    check started measuring while the fetch was in flight, and the render
+    showed up as jank. Restarting only when Playwright sees no request in
+    flight keeps that load work out.
+    """
+    result = await chromium.measure_interaction(
+        f"{page_server}/navigates-late.html",
+        actions=[{"type": "click", "selector": "#go"}],
+        wait_time=4.0,
+        trace_compositor=True,
+    )
+
+    timing = result.timing
+    assert timing is not None
+    assert any("restarted once the new page" in n for n in timing.notes), timing.notes
+    assert timing.frames_presented > 30, timing
+    assert timing.jank_percentage < 2.0, timing
+    assert timing.long_animation_frames == (), timing.long_animation_frames
+    # The trace spans both documents and the load, so it is left out and explained.
+    assert timing.compositor is None
+    assert any("compositor trace was left out" in n for n in timing.notes), timing.notes
+
+
 async def test_configured_refresh_rate_is_used(chromium: BrowserRecorder, page_server: str) -> None:
     result = await chromium.measure_interaction(
         f"{page_server}/smooth.html", wait_time=1.0, refresh_rate_hz=30.0
