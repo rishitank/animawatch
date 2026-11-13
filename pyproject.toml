@@ -1,6 +1,6 @@
 [project]
 name = "animawatch"
-version = "0.3.1"
+version = "0.4.0"
 description = "MCP server that measures animation jank inside the page and finds visual artifacts with AI vision"
 readme = "README.md"
 license = { text = "MIT" }
