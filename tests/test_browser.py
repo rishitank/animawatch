@@ -345,11 +345,37 @@ class TestBuildTiming:
         assert result.jank_percentage == 0.0
 
     def test_navigation_overflow_and_hidden_are_noted(self) -> None:
-        raw = self._raw(timeOrigin=2000.0, overflow=True, visibility="hidden")
+        raw = self._raw(
+            timeOrigin=2000.0, framesOverflow=True, loafOverflow=True, visibility="hidden"
+        )
         notes = " ".join(_build_timing(raw, 16.7, "calibrated", 1000.0, None, []).notes)
         assert "navigated" in notes
-        assert "buffer filled" in notes
+        assert "frame buffer filled" in notes
+        assert "long animation frames were kept" in notes
         assert "hidden" in notes
+
+    def test_full_frame_buffer_ends_the_window_at_the_last_frame(self) -> None:
+        """Time after the buffer filled was not recorded, so it is not a stall."""
+        last = 100.0 + 59 * 16.7
+        raw = self._raw(stoppedAt=last + 60_000.0)
+        assert _build_timing(raw, 16.7, "calibrated", 1000.0, None, []).dropped_frames > 3000
+
+        full = _build_timing(
+            self._raw(stoppedAt=last + 60_000.0, framesOverflow=True),
+            16.7,
+            "calibrated",
+            1000.0,
+            None,
+            [],
+        )
+        assert full.dropped_frames == 0
+        assert full.duration_ms == pytest.approx(last - 90.0)
+
+    def test_long_animation_frame_overflow_keeps_the_window(self) -> None:
+        """Only a full frame buffer shortens the window, not a full LoAF list."""
+        last = 100.0 + 59 * 16.7
+        raw = self._raw(stoppedAt=last + 500.0, loafOverflow=True)
+        assert _build_timing(raw, 16.7, "calibrated", 1000.0, None, []).dropped_frames > 0
 
     def test_new_page_that_never_went_quiet_is_explained(self) -> None:
         raw = self._raw(timeOrigin=2000.0, timestamps=[], startedAt=None)

@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from animawatch.cache import AnalysisCache, analysis_cache
-from animawatch.frames import ExtractedFrame, FrameExtractionResult, video_duration_ms
+from animawatch.frames import (
+    ExtractedFrame,
+    FrameExtractionResult,
+    _sample_by_time,
+    video_duration_ms,
+)
 from animawatch.models import AnalysisResult
 from animawatch.retry import vision_circuit
 from animawatch.vision import (
@@ -258,7 +263,10 @@ class TestOllamaProvider:
         return provider
 
     @staticmethod
-    def _make_video(path: Path, seconds: int, rate: int = 25) -> Path:
+    def _make_video(path: Path, seconds: int, rate: int = 25, source: str = "testsrc") -> Path:
+        # A lavfi source with options of its own (color=c=red) takes more after ':'.
+        options = f"duration={seconds}:size=160x120:rate={rate}"
+        spec = f"{source}:{options}" if "=" in source else f"{source}={options}"
         made = subprocess.run(
             [
                 "ffmpeg",
@@ -267,7 +275,7 @@ class TestOllamaProvider:
                 "-f",
                 "lavfi",
                 "-i",
-                f"testsrc=duration={seconds}:size=160x120:rate={rate}",
+                spec,
                 "-c:v",
                 "libvpx",
                 "-y",
@@ -336,6 +344,44 @@ class TestOllamaProvider:
         ]
         assert times[0] == 0.0
         assert times[-1] >= 70.0, times
+
+    @pytest.mark.asyncio
+    async def test_unknown_duration_is_reported_not_hidden(self, tmp_path: Path) -> None:
+        video = self._make_video(tmp_path / "clip.webm", 2)
+        client = AsyncMock()
+        client.chat.return_value = {"message": {"content": "ok"}}
+
+        with patch("animawatch.vision.video_duration_ms", AsyncMock(return_value=None)):
+            text = await self._provider(client).analyze_video(video, "Analyze")
+            client.chat.return_value = {
+                "message": {"content": '{"findings": [], "summary": "fine", "overall_score": 100}'}
+            }
+            structured = await self._provider(client).analyze_video(
+                video, "Analyze", structured=True
+            )
+
+        assert isinstance(text, str)
+        assert text.startswith("_ffprobe could not read the video's length")
+        assert "first 60 s" in text
+        assert isinstance(structured, AnalysisResult)
+        assert structured.summary.startswith("ffprobe could not read")
+
+    @pytest.mark.asyncio
+    async def test_every_candidate_frame_is_removed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A still video's candidates are nearly all dropped as duplicates; none stay on disk."""
+        video = self._make_video(tmp_path / "still.webm", 3, rate=5, source="color=c=red")
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        monkeypatch.setattr("animawatch.vision.tempfile.mkdtemp", lambda prefix: str(work_dir))
+        client = AsyncMock()
+        client.chat.return_value = {"message": {"content": "ok"}}
+
+        await self._provider(client).analyze_video(video, "Analyze")
+
+        assert client.chat.await_count < 8  # duplicates were filtered out
+        assert not work_dir.exists()
 
     @pytest.mark.asyncio
     async def test_analyze_video_without_frames_explains_ffmpeg(self, tmp_path: Path) -> None:
@@ -456,6 +502,27 @@ class TestScanInterval:
     @pytest.mark.asyncio
     async def test_duration_of_a_missing_file_is_unknown(self, tmp_path: Path) -> None:
         assert await video_duration_ms(tmp_path / "missing.webm") is None
+
+
+class TestSampleByTime:
+    def test_keeps_the_first_frame_at_or_after_each_interval(self) -> None:
+        # 5 fps (200 ms frames) sampled every 313 ms.
+        times = [i * 200.0 for i in range(20)]
+        kept = list(_sample_by_time(times, 313))
+        assert kept == [0, 2, 4, 5, 7, 8, 10, 11, 13, 15, 16, 18, 19]
+        # The n-th sample never runs ahead of n intervals by more than one frame.
+        for n, index in enumerate(kept[1:], start=1):
+            assert times[index] >= n * 313 - 200
+
+    def test_a_75_second_video_is_covered_to_the_end(self) -> None:
+        times = (i * 200.0 for i in range(75 * 5))  # 75 s at 5 fps
+        kept = list(_sample_by_time(times, scan_interval_ms(75_000)))
+        assert len(kept) <= OLLAMA_VIDEO_SCAN_MAX_FRAMES
+        assert kept[-1] * 200.0 >= 74_000
+
+    def test_dense_frames_keep_one_per_interval(self) -> None:
+        times = [i * 1000 / 60 for i in range(600)]  # 10 s at 60 fps
+        assert len(list(_sample_by_time(times, 250))) == 40
 
 
 class TestSpread:
