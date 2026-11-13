@@ -11,7 +11,7 @@ from animawatch.cache import AnalysisCache, analysis_cache
 from animawatch.frames import ExtractedFrame, FrameExtractionResult
 from animawatch.models import AnalysisResult
 from animawatch.retry import vision_circuit
-from animawatch.vision import GeminiProvider, OllamaProvider, get_vision_provider
+from animawatch.vision import GeminiProvider, OllamaProvider, get_vision_provider, spread
 
 
 @pytest.fixture(autouse=True)
@@ -249,10 +249,8 @@ class TestOllamaProvider:
         provider._cache = AnalysisCache()
         return provider
 
-    @pytest.mark.asyncio
-    async def test_analyze_video_samples_frames(self, tmp_path: Path) -> None:
-        """Ollama takes images only: a real video is split into frames, each analysed."""
-        video = tmp_path / "clip.webm"
+    @staticmethod
+    def _make_video(path: Path, seconds: int) -> Path:
         made = subprocess.run(
             [
                 "ffmpeg",
@@ -261,27 +259,53 @@ class TestOllamaProvider:
                 "-f",
                 "lavfi",
                 "-i",
-                "testsrc=duration=2:size=160x120:rate=25",
+                f"testsrc=duration={seconds}:size=160x120:rate=25",
                 "-c:v",
                 "libvpx",
                 "-y",
-                str(video),
+                str(path),
             ],
             check=False,
         )
         assert made.returncode == 0, "ffmpeg is needed for this test"
+        return path
+
+    @pytest.mark.asyncio
+    async def test_analyze_video_samples_frames(self, tmp_path: Path) -> None:
+        """Ollama takes images only: a real video is split into frames, each analysed."""
+        video = self._make_video(tmp_path / "clip.webm", 2)
 
         client = AsyncMock()
         client.chat.return_value = {"message": {"content": "frame looks fine"}}
         result = await self._provider(client).analyze_video(video, "Analyze")
 
         assert isinstance(result, str)
-        assert client.chat.await_count >= 2
+        assert client.chat.await_count == 8
         assert "### Frame at 0.0s" in result
         assert "### Frame at 0.5s" in result
         prompt = client.chat.call_args_list[0].kwargs["messages"][0]["content"]
         assert "still frame" in prompt
         assert "Analyze" in prompt
+
+    @pytest.mark.asyncio
+    async def test_analyze_video_samples_the_whole_recording(self, tmp_path: Path) -> None:
+        """Eight frames spread over a 12 s video, not the first four seconds of it."""
+        video = self._make_video(tmp_path / "long.webm", 12)
+
+        client = AsyncMock()
+        client.chat.return_value = {"message": {"content": "ok"}}
+        result = await self._provider(client).analyze_video(video, "Analyze")
+
+        assert isinstance(result, str)
+        assert client.chat.await_count == 8
+        times = [
+            float(line.split("at ")[1].rstrip("s"))
+            for line in result.splitlines()
+            if line.startswith("### Frame at")
+        ]
+        assert times[0] == 0.0
+        assert times[-1] >= 11.0
+        assert times == sorted(times)
 
     @pytest.mark.asyncio
     async def test_analyze_video_without_frames_explains_ffmpeg(self, tmp_path: Path) -> None:
@@ -316,6 +340,8 @@ class TestOllamaProvider:
 
         assert isinstance(result, AnalysisResult)
         assert len(result.findings) == 2
+        # Findings without a timestamp take the time of the frame they came from.
+        assert [f.timestamp for f in result.findings] == [0.0, 0.5]
         assert result.overall_score == 70
         assert result.metadata.provider == "ollama"
         assert not frames[0].path.exists()  # frames are cleaned up
@@ -384,3 +410,17 @@ class TestGetVisionProvider:
             mock_settings.vision_provider = "none"
             with pytest.raises(ValueError, match="turned off"):
                 get_vision_provider()
+
+
+class TestSpread:
+    @pytest.mark.parametrize(
+        ("n", "count", "expected"),
+        [
+            (3, 8, [0, 1, 2]),
+            (10, 4, [0, 3, 6, 9]),
+            (240, 8, [0, 34, 68, 102, 137, 171, 205, 239]),
+            (5, 1, [0]),
+        ],
+    )
+    def test_evenly_spaced_with_both_ends(self, n: int, count: int, expected: list[int]) -> None:
+        assert spread(list(range(n)), count) == expected

@@ -267,3 +267,52 @@ class TestReport:
         result = analyze_frame_timestamps(stamps, HZ60)
         report = generate_fps_report(result, max_events=10)
         assert "... and 5 more" in report
+
+
+class TestMainThreadCaveat:
+    def test_dropped_frames_without_trace_explain_main_thread_scope(self) -> None:
+        stamps = frames(30)
+        stamps.append(stamps[-1] + 100.0)
+        report = generate_fps_report(analyze_frame_timestamps(stamps, HZ60))
+        assert "main-thread frames" in report
+        assert "trace_compositor=True" in report
+
+    def test_no_caveat_when_smooth_or_traced(self) -> None:
+        assert "trace_compositor=True" not in generate_fps_report(
+            analyze_frame_timestamps(frames(30), HZ60)
+        )
+        stamps = frames(30)
+        stamps.append(stamps[-1] + 100.0)
+        traced = analyze_frame_timestamps(
+            stamps, HZ60, compositor=CompositorFrameStats(30, 0, 0, 0)
+        )
+        assert "trace_compositor=True" not in generate_fps_report(traced)
+
+
+class TestWindowEdges:
+    def test_stall_before_the_first_frame_counts(self) -> None:
+        # Measurement started at 0, but the first frame came a second later.
+        stamps = frames(3, start=1000.0)
+        result = analyze_frame_timestamps(stamps, HZ60, started_at_ms=0.0, stopped_at_ms=1040.0)
+
+        assert result.frames_presented == 2  # the edges are not frames
+        assert result.dropped_frames == round(1000.0 / HZ60) - 1
+        assert result.jank_percentage > 90.0
+        assert result.duration_ms == pytest.approx(1040.0)
+        assert result.jank_events[0].timestamp_ms == pytest.approx(0.0)
+
+    def test_stall_after_the_last_frame_counts(self) -> None:
+        stamps = frames(60)
+        result = analyze_frame_timestamps(
+            stamps, HZ60, started_at_ms=stamps[0], stopped_at_ms=stamps[-1] + 500.0
+        )
+        assert result.dropped_frames == round(500.0 / HZ60) - 1
+        assert result.jank_events[-1].frame_delta_ms == pytest.approx(500.0)
+
+    def test_normal_edges_add_nothing(self) -> None:
+        stamps = frames(60, start=1000.0)
+        result = analyze_frame_timestamps(
+            stamps, HZ60, started_at_ms=995.0, stopped_at_ms=stamps[-1] + 10.0
+        )
+        assert result.dropped_frames == 0
+        assert result.duration_ms == pytest.approx(stamps[-1] + 10.0 - 995.0)
