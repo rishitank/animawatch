@@ -74,6 +74,13 @@ class Settings(BaseSettings):
         default=True,
         description="Allow file:// URLs (turned off when hosted, e.g. on Apify)",
     )
+    hosted: bool = Field(
+        default=False,
+        description=(
+            "Running as a hosted service (set by the Apify Actor): no local files are "
+            "written for the client"
+        ),
+    )
     refresh_rate_hz: float | None = Field(
         default=None,
         gt=0,
@@ -95,10 +102,22 @@ class Settings(BaseSettings):
     # Server settings
     server_host: str = Field(default="127.0.0.1", description="Server bind address")
     server_port: int = Field(default=8765, description="Server port for HTTP transport")
+    allowed_hosts: str = Field(
+        default="",
+        description=(
+            "Comma-separated extra host names the HTTP transport accepts in Host and "
+            "Origin headers (for example a reverse proxy's domain). Localhost is always allowed"
+        ),
+    )
     recordings_dir: Path | None = Field(
         default=None,
         description="Directory to store recordings (default: temp)",
     )
+
+    @property
+    def allowed_hosts_list(self) -> list[str]:
+        """``allowed_hosts`` split into names."""
+        return [h.strip() for h in self.allowed_hosts.split(",") if h.strip()]
 
     @property
     def video_size(self) -> ViewportSize:

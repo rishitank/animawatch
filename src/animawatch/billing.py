@@ -8,7 +8,8 @@ Tools wrap their work in :func:`metered`. It reserves the events before any
 page is loaded, so a run that has reached the user's spending limit refuses
 work instead of doing it for free (concurrent calls cannot both claim the last
 event). It charges only when the work finished without an exception, and
-releases the reservation otherwise.
+releases the reservation otherwise. If the charge itself fails, the failure is
+logged and the finished result is still returned.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from typing import Protocol
 
 from mcp.server.fastmcp.exceptions import ToolError
 
+from .logging import log_extra
+
 #: Event name, matching ``.actor/pay_per_event.json``.
 PAGE_ANALYSED = "page-analysed"
 
@@ -30,11 +33,9 @@ class UsageMeter(Protocol):
 
     async def remaining(self, event: str) -> int | None:
         """How many more of ``event`` may be charged; None means unlimited."""
-        ...
 
     async def charge(self, event: str, count: int) -> None:
         """Charge ``count`` occurrences of ``event``."""
-        ...
 
 
 class NoopMeter:
@@ -87,17 +88,25 @@ async def metered(event: str, count: int = 1) -> AsyncIterator[None]:
     async with _lock:
         await ensure_can_charge(event, count)
         _reserved[event] += count
-    succeeded = False
     try:
         yield
-        succeeded = True
+        try:
+            await charge(event, count)
+        except Exception as err:
+            # The work is done and the run has paid its compute: losing one
+            # event's revenue is better than throwing the result away.
+            log_extra("Charging failed; result returned", event=event, error=str(err))
     finally:
-        async with _lock:
-            _reserved[event] -= count
-            if _reserved[event] <= 0:
-                del _reserved[event]
-            if succeeded:
-                await charge(event, count)
+        # Synchronous, so a cancellation cannot interrupt it and leave the
+        # reservation behind. Until it runs, a finished charge is counted both
+        # by the meter and here, which errs towards refusing, never overspending.
+        _release(event, count)
+
+
+def _release(event: str, count: int) -> None:
+    _reserved[event] -= count
+    if _reserved[event] <= 0:
+        del _reserved[event]
 
 
 async def charge(event: str, count: int = 1) -> None:

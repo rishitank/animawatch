@@ -11,7 +11,8 @@ Hosted differences from a local install:
 - ``file://`` URLs are refused, and the tools that take or return local file
   paths (``analyze_video``, ``record``) are not offered;
 - the vision pass uses the key the user supplies in the Actor input
-  (``geminiApiKey``, a secret field) or is off; Ollama is not available;
+  (``geminiApiKey``, a secret field) or is off; Ollama is not available, so
+  ``analyze_with_consensus_tool`` is not offered either;
 - each page a tool loads and analyses is charged as one ``page-analysed`` event,
   only after the result is ready, and a run past its spending limit refuses work.
 
@@ -24,10 +25,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from typing import Any
 
 from mcp.server.fastmcp.exceptions import ToolError
+from pydantic import BaseModel, ConfigDict, Field
 
 from .billing import PAGE_ANALYSED, set_meter
 from .config import DEFAULT_GEMINI_MODEL, settings
@@ -41,36 +43,52 @@ ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 READINESS_HEADER = b"x-apify-container-server-readiness-probe"
 MCP_PATH = "/mcp"
 #: Tools that read or write local files: meaningless or unsafe when hosted.
-HOSTED_DISABLED_TOOLS = ("analyze_video", "record")
+#: Consensus needs Ollama, which a hosted run does not have.
+HOSTED_DISABLED_TOOLS = ("analyze_video", "record", "analyze_with_consensus_tool")
 #: Idle MCP sessions are closed after this many seconds.
 SESSION_IDLE_TIMEOUT_SECONDS = 300
 
 
-def apply_actor_input(actor_input: dict[str, Any] | None) -> None:
-    """Configure vision and limits from the Actor input.
+class ActorInput(BaseModel):
+    """The Actor input (``.actor/input_schema.json``), validated before use."""
 
-    Input fields (see ``.actor/input_schema.json``): ``geminiApiKey`` (secret),
-    ``visionModel``, ``visionEnabled`` and ``maxWaitSeconds``. A key in the
-    ``GEMINI_API_KEY`` environment variable is used when the input has none.
+    model_config = ConfigDict(populate_by_name=True, extra="ignore", strict=True)
+
+    gemini_api_key: str | None = Field(default=None, alias="geminiApiKey")
+    vision_enabled: bool = Field(default=True, alias="visionEnabled")
+    vision_model: str | None = Field(default=None, alias="visionModel", min_length=1)
+    max_wait_seconds: int | None = Field(default=None, alias="maxWaitSeconds", ge=1, le=120)
+
+
+def apply_actor_input(actor_input: Mapping[str, Any] | None) -> None:
+    """Validate the Actor input, then configure vision and limits from it.
+
+    Raises ``pydantic.ValidationError`` for input that does not match the schema,
+    before any setting is changed. A key in the ``GEMINI_API_KEY`` environment
+    variable is used when the input has none. With vision turned off, any key
+    is dropped, so nothing can send page images to Gemini.
     """
-    data = actor_input or {}
-    key = str(data.get("geminiApiKey") or "").strip()
+    parsed = ActorInput.model_validate(dict(actor_input or {}))
+
+    key = (parsed.gemini_api_key or "").strip()
     if key:
         settings.gemini_api_key = key
-    model = str(data.get("visionModel") or "").strip()
-    settings.vision_model = model or settings.vision_model or DEFAULT_GEMINI_MODEL
+    if parsed.vision_model:
+        settings.vision_model = parsed.vision_model.strip()
+    if not settings.vision_model:
+        settings.vision_model = DEFAULT_GEMINI_MODEL
 
-    vision_enabled = data.get("visionEnabled", True)
-    if vision_enabled is False or not settings.gemini_api_key:
-        settings.vision_provider = "none"
-    else:
+    if parsed.vision_enabled and settings.gemini_api_key:
         settings.vision_provider = "gemini"
+    else:
+        settings.vision_provider = "none"
+        settings.gemini_api_key = ""
 
-    max_wait = data.get("maxWaitSeconds")
-    if isinstance(max_wait, int) and not isinstance(max_wait, bool) and 1 <= max_wait <= 120:
-        settings.max_recording_duration = max_wait
+    if parsed.max_wait_seconds is not None:
+        settings.max_recording_duration = parsed.max_wait_seconds
 
     settings.allow_file_urls = False
+    settings.hosted = True
     settings.browser_headless = True
 
 
@@ -84,9 +102,10 @@ def configure_hosted_server() -> None:
             mcp.remove_tool(name)
     mcp.settings.streamable_http_path = MCP_PATH
     mcp.settings.session_idle_timeout = SESSION_IDLE_TIMEOUT_SECONDS
-    # The container is reachable only through Apify's authenticated proxy, whose
-    # Host header is the Actor's standby domain. DNS-rebinding protection guards
-    # servers on a user's own localhost and would reject the proxy's requests.
+    # Host/Origin checks are off here only. The container has no address a
+    # victim's browser can reach (DNS rebinding needs one): every request comes
+    # through Apify's proxy, which requires the user's API token, and its Host
+    # header is the standby domain, which the localhost-only checks would refuse.
     mcp.settings.transport_security = None
 
 
