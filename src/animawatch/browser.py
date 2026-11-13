@@ -15,7 +15,7 @@ import contextlib
 import math
 import os
 import tempfile
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +31,15 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from .actions import (
+    Action,
+    ClickAction,
+    HoverAction,
+    ScrollAction,
+    TypeAction,
+    WaitAction,
+    parse_actions,
+)
 from .config import settings
 from .devices import DeviceProfile, get_device
 from .fps import (
@@ -314,7 +323,7 @@ class BrowserRecorder:
     async def measure_interaction(
         self,
         url: str,
-        actions: list[dict[str, Any]] | None = None,
+        actions: Sequence[Action | Mapping[str, Any]] | None = None,
         wait_time: float = 3.0,
         *,
         device: str | DeviceProfile | None = None,
@@ -342,6 +351,7 @@ class BrowserRecorder:
             refresh_rate_hz: Judge against this refresh rate instead of measuring it
         """
         validate_url(url)
+        steps = parse_actions(actions)
         wait = clamp_seconds(wait_time)
         browser = await self._ensure_browser()
 
@@ -385,8 +395,8 @@ class BrowserRecorder:
                 # A navigation during the actions re-arms measurement in the new document.
                 await context.add_init_script(FRAME_AUTOSTART_JS)
 
-            for action in actions or []:
-                await self._perform_action(page, action)
+            for step in steps:
+                await self._perform_action(page, step)
 
             await asyncio.sleep(wait)
 
@@ -415,7 +425,7 @@ class BrowserRecorder:
     async def record_interaction(
         self,
         url: str,
-        actions: list[dict[str, Any]] | None = None,
+        actions: Sequence[Action | Mapping[str, Any]] | None = None,
         wait_time: float = 3.0,
         video_dir: Path | None = None,
         device: str | None = None,
@@ -504,38 +514,21 @@ class BrowserRecorder:
         finally:
             await context.close()
 
-    async def _perform_action(self, page: Page, action: dict[str, Any]) -> None:
-        """Perform a single browser action."""
-        action_type = action.get("type", "")
+    async def _perform_action(self, page: Page, action: Action | Mapping[str, Any]) -> None:
+        """Perform a single browser action (validated first)."""
+        (parsed,) = parse_actions([action])
 
-        if action_type == "click":
-            selector = action.get("selector")
-            if selector:
-                await page.click(selector)
-
-        elif action_type == "type":
-            selector = action.get("selector")
-            text = action.get("text", "")
-            if selector:
-                await page.fill(selector, text)
-
-        elif action_type == "scroll":
-            try:
-                y = float(action.get("y", 500))
-            except (TypeError, ValueError):
-                y = 500.0
-            if not math.isfinite(y):
-                y = 500.0
+        if isinstance(parsed, ClickAction):
+            await page.click(parsed.selector)
+        elif isinstance(parsed, TypeAction):
+            await page.fill(parsed.selector, parsed.text)
+        elif isinstance(parsed, ScrollAction):
             # Passed as an argument, never formatted into the script.
-            await page.evaluate("(y) => window.scrollBy(0, y)", y)
-
-        elif action_type == "wait":
-            await asyncio.sleep(clamp_seconds(action.get("duration", 1.0)))
-
-        elif action_type == "hover":
-            selector = action.get("selector")
-            if selector:
-                await page.hover(selector)
+            await page.evaluate("(y) => window.scrollBy(0, y)", parsed.y)
+        elif isinstance(parsed, WaitAction):
+            await asyncio.sleep(clamp_seconds(parsed.duration))
+        elif isinstance(parsed, HoverAction):
+            await page.hover(parsed.selector)
 
 
 def _build_timing(
@@ -565,6 +558,11 @@ def _build_timing(
         notes.append("The collector's buffer filled; the end of the window was not recorded.")
     if raw.get("visibility") == "hidden":
         notes.append("The page was hidden, so the browser throttled its frames.")
+    if raw.get("armedAfterNavigation"):
+        notes.append(
+            "After the navigation, measurement restarted once the new page had loaded and "
+            "its network had been quiet for 500 ms, so its load work is not counted."
+        )
 
     if interval is None:
         estimated = estimate_refresh_interval_from_busy(timestamps)
@@ -574,11 +572,13 @@ def _build_timing(
             interval, source = estimated, "estimated"
 
     started_at = raw.get("startedAt")
+    stopped_at = raw.get("stoppedAt")
     return analyze_frame_timestamps(
         timestamps,
         interval,
         refresh_source=source,
         started_at_ms=float(started_at) if started_at is not None else None,
+        stopped_at_ms=float(stopped_at) if stopped_at is not None else None,
         long_animation_frames=parse_long_animation_frames(
             raw.get("loaf", []), float(started_at) if started_at is not None else 0.0
         ),
