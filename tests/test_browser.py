@@ -371,6 +371,26 @@ class TestBuildTiming:
         assert full.dropped_frames == 0
         assert full.duration_ms == pytest.approx(last - 90.0)
 
+    def test_full_frame_buffer_limits_every_diagnostic_to_the_window(self) -> None:
+        """Long animation frames and the compositor trace past the last frame are left out."""
+        from animawatch.fps import CompositorFrameStats
+
+        last = 100.0 + 59 * 16.7
+        inside = {"startTime": 500.0, "duration": 80.0, "blockingDuration": 30.0, "scripts": []}
+        after = {"startTime": last + 30_000.0, "duration": 90.0, "blockingDuration": 40.0}
+        stats = CompositorFrameStats(presented_all=50, presented_partial=0, dropped=0, no_update=0)
+        raw = self._raw(stoppedAt=last + 60_000.0, loaf=[inside, after])
+
+        full = _build_timing({**raw, "framesOverflow": True}, 16.7, "calibrated", 1000.0, stats, [])
+        assert [f.duration_ms for f in full.long_animation_frames] == [80.0]
+        assert full.compositor is None
+        assert any("runs past the last recorded frame" in n for n in full.notes)
+
+        # Without an overflow, nothing is cut.
+        normal = _build_timing(raw, 16.7, "calibrated", 1000.0, stats, [])
+        assert len(normal.long_animation_frames) == 2
+        assert normal.compositor == stats
+
     def test_long_animation_frame_overflow_keeps_the_window(self) -> None:
         """Only a full frame buffer shortens the window, not a full LoAF list."""
         last = 100.0 + 59 * 16.7
